@@ -7,25 +7,26 @@ const router = express.Router();
 
 /**
  * RSS Feed Generation Routes
+ * FIX: Wrap tất cả method calls trong arrow function để giữ nguyên 'this' context
  */
 
 // Main feed generation endpoint
 router.get('/feed',
     ValidationService.validateFeedRequest,
-    feedController.generateFeed
+    (req, res, next) => feedController.generateFeed(req, res, next)
 );
 
 // Get feed metadata
 router.get('/metadata',
     ValidationService.validateFeedRequest,
-    feedController.getFeedMetadata
+    (req, res, next) => feedController.getFeedMetadata(req, res, next)
 );
 
 // Preview articles (for testing/debugging)
 router.get('/preview',
     ValidationService.validateFeedRequest,
     ValidationService.validatePagination,
-    feedController.previewArticles
+    (req, res, next) => feedController.previewArticles(req, res, next)
 );
 
 /**
@@ -33,15 +34,15 @@ router.get('/preview',
  */
 
 // Health check (no validation needed)
-router.get('/health', feedController.healthCheck);
+router.get('/health', (req, res) => feedController.healthCheck(req, res));
 
 // API information (no validation needed)
-router.get('/api/info', feedController.getApiInfo);
+router.get('/api/info', (req, res) => feedController.getApiInfo(req, res));
 
 // Website validation
 router.post('/validate',
     ValidationService.validateWebsiteRequest,
-    feedController.validateWebsite
+    (req, res, next) => feedController.validateWebsite(req, res, next)
 );
 
 /**
@@ -49,12 +50,12 @@ router.post('/validate',
  */
 
 // Get cache statistics (no validation needed)
-router.get('/cache/stats', feedController.getCacheStats);
+router.get('/cache/stats', (req, res, next) => feedController.getCacheStats(req, res, next));
 
 // Clear cache
 router.delete('/cache',
     ValidationService.validateCacheRequest,
-    feedController.clearCache
+    (req, res, next) => feedController.clearCache(req, res, next)
 );
 
 /**
@@ -194,13 +195,13 @@ router.get('/', (req, res) => {
 // Alternative feed route (some feed readers expect /rss)
 router.get('/rss',
     ValidationService.validateFeedRequest,
-    feedController.generateFeed
+    (req, res, next) => feedController.generateFeed(req, res, next)
 );
 
 // Alternative feed route (some expect /feeds)
 router.get('/feeds',
     ValidationService.validateFeedRequest,
-    feedController.generateFeed
+    (req, res, next) => feedController.generateFeed(req, res, next)
 );
 
 // Atom feed support (returns RSS but with atom content-type)

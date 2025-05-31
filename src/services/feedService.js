@@ -1,12 +1,13 @@
 // src/services/feedService.js
 const RSS = require('rss');
+const crypto = require('crypto'); // ✅ THÊM: Crypto module cho hash SHA256
 const config = require('../../config');
 const scraperService = require('./scraperService');
 const { extractDomain, logWithTimestamp } = require('../utils/helpers');
 const { FeedGenerationError, CacheError, ValidationError, NoArticlesError } = require('../errors');
 
 /**
- * Feed Service (Enhanced)
+ * Feed Service (Enhanced với Cache Logic Fixed)
  * Handles RSS feed generation and management with improved error handling and caching
  */
 class FeedService {
@@ -29,7 +30,7 @@ class FeedService {
      */
     async generateFeed(websiteUrl, options = {}) {
         try {
-            // Validate and normalize URL
+            // Validate and normalize URL - ✅ FIXED: Đừng normalize quá mức
             const normalizedUrl = this.validateAndNormalizeUrl(websiteUrl);
             const cacheKey = this.getCacheKey(normalizedUrl, options);
 
@@ -320,7 +321,7 @@ class FeedService {
     }
 
     /**
-     * Validate and normalize URL
+     * ✅ FIXED: Validate and normalize URL (đừng quá aggressive)
      * @param {string} url - URL to validate
      * @returns {string} - Normalized URL
      */
@@ -336,10 +337,15 @@ class FeedService {
                 throw new ValidationError('Only HTTP and HTTPS protocols are supported');
             }
 
-            // Normalize URL
-            urlObj.pathname = urlObj.pathname.replace(/\/$/, '') || '/';
-            urlObj.search = ''; // Remove query parameters for caching consistency
-            urlObj.hash = ''; // Remove fragment
+            // ✅ FIXED: Normalize ít hơn để giữ path distinction
+            // Chỉ remove trailing slash ở cuối pathname nếu không phải root
+            if (urlObj.pathname !== '/' && urlObj.pathname.endsWith('/')) {
+                urlObj.pathname = urlObj.pathname.slice(0, -1);
+            }
+
+            // ⚠️ GIỮ NGUYÊN: search params để URLs khác nhau có cache riêng
+            // urlObj.search = ''; // ❌ REMOVED: Đừng xóa search params
+            urlObj.hash = ''; // Chỉ xóa fragment
 
             return urlObj.toString();
 
@@ -378,6 +384,9 @@ class FeedService {
             this.feedCache.set(cacheKey, feedXml);
             this.cacheTimestamps.set(cacheKey, Date.now());
 
+            // Log cache operation with key for debugging
+            logWithTimestamp(`Cached feed with key: ${cacheKey}`);
+
             // Implement LRU cache cleanup
             if (this.feedCache.size > 100) {
                 this.cleanupOldCache();
@@ -389,21 +398,40 @@ class FeedService {
     }
 
     /**
-     * Generate cache key with options consideration
+     * ✅ FIXED: Generate cache key với SHA256 hash để tránh collision
      * @param {string} url - Website URL
      * @param {object} options - Feed options
      * @returns {string} - Cache key
      */
     getCacheKey(url, options = {}) {
-        const domain = extractDomain(url);
-        const optionsHash = this.hashOptions(options);
-        const urlHash = Buffer.from(url).toString('base64').substring(0, 10);
+        try {
+            // ✅ NEW: Sử dụng SHA256 thay vì base64 truncated
+            const urlHash = crypto
+                .createHash('sha256')
+                .update(url)
+                .digest('hex')
+                .substring(0, 16); // Lấy 16 ký tự đầu của SHA256 (vẫn unique)
 
-        return `feed_${domain}_${urlHash}_${optionsHash}`;
+            // Hash options
+            const optionsHash = this.hashOptions(options);
+
+            // ✅ NEW: Structure rõ ràng hơn
+            const cacheKey = `feed_${urlHash}_${optionsHash}`;
+
+            // Debug log để kiểm tra
+            logWithTimestamp(`Generated cache key for ${url}: ${cacheKey}`);
+
+            return cacheKey;
+
+        } catch (error) {
+            logWithTimestamp(`Error generating cache key: ${error.message}`, 'error');
+            // Fallback to timestamp-based key
+            return `feed_fallback_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        }
     }
 
     /**
-     * Hash options for cache key
+     * ✅ IMPROVED: Hash options for cache key
      * @param {object} options - Options to hash
      * @returns {string} - Hash string
      */
@@ -415,7 +443,13 @@ class FeedService {
         };
 
         const optionsStr = JSON.stringify(relevantOptions);
-        return Buffer.from(optionsStr).toString('base64').substring(0, 8);
+
+        // ✅ NEW: Sử dụng SHA256 cho options cũng
+        return crypto
+            .createHash('sha256')
+            .update(optionsStr)
+            .digest('hex')
+            .substring(0, 8); // 8 ký tự đủ cho options
     }
 
     /**
@@ -429,11 +463,20 @@ class FeedService {
 
             if (url) {
                 const normalizedUrl = this.validateAndNormalizeUrl(url);
-                const domain = extractDomain(normalizedUrl);
 
-                // Clear all cache entries for this domain
+                // ✅ FIXED: Tìm cache key chính xác cho URL này
+                const targetKey = this.getCacheKey(normalizedUrl, {});
+
+                // Clear exact match
+                if (this.feedCache.has(targetKey)) {
+                    this.feedCache.delete(targetKey);
+                    this.cacheTimestamps.delete(targetKey);
+                    clearedCount++;
+                }
+
+                // ✅ ENHANCED: Clear tất cả variants của URL này (với options khác nhau)
                 for (const [key, value] of this.feedCache.entries()) {
-                    if (key.includes(`feed_${domain}_`)) {
+                    if (key.includes(this.getCacheKey(normalizedUrl, {}).split('_')[1])) {
                         this.feedCache.delete(key);
                         this.cacheTimestamps.delete(key);
                         clearedCount++;
