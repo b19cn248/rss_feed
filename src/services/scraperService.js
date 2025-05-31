@@ -1,321 +1,367 @@
 // src/services/scraperService.js
-const axios = require('axios');
-const cheerio = require('cheerio');
-const config = require('../../config');
-const {
-    cleanText,
-    makeAbsoluteUrl,
-    stripHtml,
-    truncateText,
-    logWithTimestamp,
-    retryWithBackoff
-} = require('../utils/helpers');
+const httpService = require('./httpService');
+const contentParserService = require('./contentParserService');
+const { logWithTimestamp } = require('../utils/helpers');
+const { ScrapingError, ValidationError } = require('../errors');
 
 /**
- * Web Scraper Service
- * Handles all web scraping operations
+ * Scraper Service (Refactored)
+ * Orchestrates HTTP fetching and content parsing with proper separation of concerns
  */
 class ScraperService {
     constructor() {
-        // Axios instance với default config
-        this.httpClient = axios.create({
-            timeout: config.scraping.timeout,
-            headers: {
-                'User-Agent': config.scraping.userAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive'
-            }
-        });
+        this.httpService = httpService;
+        this.parserService = contentParserService;
+
+        // Statistics tracking
+        this.stats = {
+            totalRequests: 0,
+            successfulScrapes: 0,
+            failedScrapes: 0,
+            averageResponseTime: 0,
+            lastActivity: null
+        };
     }
 
     /**
-     * Fetch HTML content from URL
-     * @param {string} url - URL to fetch
-     * @returns {Promise<string>} - HTML content
-     */
-    async fetchHtml(url) {
-        try {
-            logWithTimestamp(`Fetching: ${url}`);
-
-            const response = await retryWithBackoff(async () => {
-                return await this.httpClient.get(url);
-            });
-
-            if (response.status !== 200) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-
-            return response.data;
-        } catch (error) {
-            logWithTimestamp(`Error fetching ${url}: ${error.message}`, 'error');
-            throw new Error(`Failed to fetch ${url}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Extract articles from a website's homepage
-     * @param {string} url - Website URL
+     * Extract articles from a website
+     * Main public method that orchestrates the scraping process
+     * @param {string} url - Website URL to scrape
+     * @param {object} options - Scraping options
      * @returns {Promise<Array>} - Array of article objects
      */
-    async extractArticles(url) {
+    async extractArticles(url, options = {}) {
+        const startTime = Date.now();
+
         try {
-            const html = await this.fetchHtml(url);
-            const $ = cheerio.load(html);
-            const articles = [];
-            const baseUrl = new URL(url).origin;
+            // Validate URL
+            this.validateUrl(url);
 
-            // Loại bỏ các elements không cần thiết
-            $('script, style, nav, footer, aside, .ad, .advertisement').remove();
+            logWithTimestamp(`Starting article extraction from: ${url}`);
 
-            // Thử các selector khác nhau để tìm articles
-            const articleElements = this.findArticleElements($);
+            // Fetch HTML content
+            const html = await this.fetchHtml(url, options);
 
-            for (const element of articleElements) {
-                const article = this.extractArticleData($, element, baseUrl);
-                if (article && this.isValidArticle(article)) {
-                    articles.push(article);
-                }
-            }
+            // Parse and extract articles
+            const articles = await this.parseArticles(html, url, options);
 
-            // Giới hạn số lượng articles
-            const limitedArticles = articles.slice(0, config.app.maxArticlesPerFeed);
+            // Update statistics
+            this.updateStats(true, Date.now() - startTime);
 
-            logWithTimestamp(`Extracted ${limitedArticles.length} articles from ${url}`);
-            return limitedArticles;
+            logWithTimestamp(`Successfully extracted ${articles.length} articles from ${url} in ${Date.now() - startTime}ms`);
+
+            return articles;
 
         } catch (error) {
-            logWithTimestamp(`Error extracting articles from ${url}: ${error.message}`, 'error');
+            this.updateStats(false, Date.now() - startTime);
+            logWithTimestamp(`Failed to extract articles from ${url}: ${error.message}`, 'error');
             throw error;
         }
     }
 
     /**
-     * Find article elements using various selectors
-     * @param {object} $ - Cheerio instance
-     * @returns {Array} - Array of article elements
+     * Fetch HTML content using HTTP service
+     * @param {string} url - URL to fetch
+     * @param {object} options - Fetch options
+     * @returns {Promise<string>} - HTML content
      */
-    findArticleElements($) {
-        const articleElements = [];
-        const seenTexts = new Set(); // Để tránh duplicate
+    async fetchHtml(url, options = {}) {
+        try {
+            const html = await this.httpService.fetchHtml(url, options);
 
-        for (const selector of config.scraping.articleListSelectors) {
-            $(selector).each((index, element) => {
-                const $element = $(element);
-                const text = cleanText($element.text());
-
-                // Skip nếu đã thấy content này rồi hoặc quá ngắn
-                if (seenTexts.has(text) || text.length < 50) {
-                    return;
-                }
-
-                seenTexts.add(text);
-                articleElements.push(element);
-            });
-
-            // Nếu đã tìm được đủ articles thì dừng
-            if (articleElements.length >= config.app.maxArticlesPerFeed * 2) {
-                break;
+            if (!html || html.trim().length === 0) {
+                throw new ScrapingError('Empty response received', url);
             }
-        }
 
-        return articleElements;
+            return html;
+
+        } catch (error) {
+            throw new ScrapingError(`Failed to fetch HTML: ${error.message}`, url, error);
+        }
     }
 
     /**
-     * Extract data from a single article element
-     * @param {object} $ - Cheerio instance
-     * @param {object} element - Article element
-     * @param {string} baseUrl - Base URL for making absolute URLs
-     * @returns {object} - Article data object
+     * Parse HTML and extract articles using content parser
+     * @param {string} html - HTML content
+     * @param {string} baseUrl - Base URL for resolving relative links
+     * @param {object} options - Parsing options
+     * @returns {Promise<Array>} - Array of articles
      */
-    extractArticleData($, element, baseUrl) {
-        const $element = $(element);
-
+    async parseArticles(html, baseUrl, options = {}) {
         try {
-            // Extract title
-            const title = this.extractTitle($, $element);
+            const articles = this.parserService.parseArticles(html, baseUrl);
 
-            // Extract URL
-            const url = this.extractUrl($, $element, baseUrl);
+            // Apply filters if specified
+            return this.applyFilters(articles, options);
 
-            // Extract description/excerpt
-            const description = this.extractDescription($, $element);
+        } catch (error) {
+            throw new ScrapingError(`Failed to parse articles: ${error.message}`, baseUrl, error);
+        }
+    }
 
-            // Extract date (optional)
-            const publishedDate = this.extractDate($, $element);
+    /**
+     * Get site metadata
+     * @param {string} url - Website URL
+     * @returns {Promise<object>} - Site metadata
+     */
+    async getSiteMetadata(url) {
+        try {
+            this.validateUrl(url);
 
-            // Extract image (optional)
-            const image = this.extractImage($, $element, baseUrl);
+            // Try to get metadata with minimal content first
+            const metadata = await this.httpService.getSiteMetadata(url);
+
+            if (metadata.title && metadata.description) {
+                return {
+                    url,
+                    title: metadata.title,
+                    description: metadata.description,
+                    contentType: metadata.contentType,
+                    charset: metadata.charset,
+                    generator: metadata.generator,
+                    language: 'en', // Will be extracted from full HTML if needed
+                    lastUpdated: new Date().toISOString()
+                };
+            }
+
+            // Fallback: fetch full HTML and extract metadata
+            const html = await this.fetchHtml(url);
+            const fullMetadata = this.parserService.extractSiteMetadata(html, url);
 
             return {
-                title: cleanText(title),
                 url,
-                description: truncateText(cleanText(description), 300),
-                publishedDate,
-                image,
-                guid: url // RSS guid
+                ...fullMetadata,
+                lastUpdated: new Date().toISOString()
             };
 
         } catch (error) {
-            logWithTimestamp(`Error extracting article data: ${error.message}`, 'warn');
-            return null;
+            throw new ScrapingError(`Failed to get site metadata: ${error.message}`, url, error);
         }
     }
 
     /**
-     * Extract title from article element
-     * @param {object} $ - Cheerio instance
-     * @param {object} $element - Article element
-     * @returns {string} - Article title
+     * Check if a website is scrapeable
+     * @param {string} url - Website URL
+     * @returns {Promise<object>} - Accessibility status
      */
-    extractTitle($, $element) {
-        const titleSelectors = [
-            'h1', 'h2', 'h3',
-            '.title', '.headline', '.post-title',
-            '[class*="title"]', '[class*="headline"]',
-            'a[title]'
-        ];
+    async checkWebsiteAccessibility(url) {
+        try {
+            this.validateUrl(url);
 
-        for (const selector of titleSelectors) {
-            const titleElement = $element.find(selector).first();
-            if (titleElement.length > 0) {
-                let title = cleanText(titleElement.text());
+            // First, check with HEAD request
+            const headCheck = await this.httpService.checkUrl(url);
 
-                // Nếu không có text, thử lấy từ title attribute
-                if (!title && titleElement.attr('title')) {
-                    title = cleanText(titleElement.attr('title'));
+            if (!headCheck.accessible) {
+                return {
+                    accessible: false,
+                    canScrape: false,
+                    reason: headCheck.error,
+                    details: headCheck
+                };
+            }
+
+            // If accessible, try to fetch and parse a small sample
+            try {
+                const html = await this.fetchHtml(url);
+                const articles = await this.parseArticles(html, url);
+
+                return {
+                    accessible: true,
+                    canScrape: true,
+                    articleCount: articles.length,
+                    contentType: headCheck.contentType,
+                    details: headCheck
+                };
+
+            } catch (parseError) {
+                return {
+                    accessible: true,
+                    canScrape: false,
+                    reason: 'Could not extract articles from this website',
+                    error: parseError.message,
+                    details: headCheck
+                };
+            }
+
+        } catch (error) {
+            return {
+                accessible: false,
+                canScrape: false,
+                reason: 'Failed to access website',
+                error: error.message
+            };
+        }
+    }
+
+    /**
+     * Scrape multiple URLs concurrently
+     * @param {Array<string>} urls - Array of URLs to scrape
+     * @param {object} options - Scraping options
+     * @returns {Promise<Array>} - Array of results
+     */
+    async scrapeMultiple(urls, options = {}) {
+        const { concurrency = 3, continueOnError = true } = options;
+        const results = [];
+
+        logWithTimestamp(`Starting concurrent scraping of ${urls.length} URLs with concurrency ${concurrency}`);
+
+        // Process URLs in chunks
+        for (let i = 0; i < urls.length; i += concurrency) {
+            const chunk = urls.slice(i, i + concurrency);
+
+            const chunkPromises = chunk.map(async (url) => {
+                try {
+                    const articles = await this.extractArticles(url, options);
+                    return { url, success: true, articles, error: null };
+                } catch (error) {
+                    if (!continueOnError) {
+                        throw error;
+                    }
+                    return { url, success: false, articles: [], error: error.message };
+                }
+            });
+
+            const chunkResults = await Promise.all(chunkPromises);
+            results.push(...chunkResults);
+        }
+
+        const successful = results.filter(r => r.success).length;
+        logWithTimestamp(`Completed scraping: ${successful}/${urls.length} successful`);
+
+        return results;
+    }
+
+    /**
+     * Apply filters to articles
+     * @param {Array} articles - Articles to filter
+     * @param {object} options - Filter options
+     * @returns {Array} - Filtered articles
+     */
+    applyFilters(articles, options) {
+        let filtered = [...articles];
+
+        // Filter by keyword
+        if (options.keyword) {
+            const keyword = options.keyword.toLowerCase();
+            filtered = filtered.filter(article =>
+                article.title.toLowerCase().includes(keyword) ||
+                article.description.toLowerCase().includes(keyword)
+            );
+        }
+
+        // Filter by date range
+        if (options.dateFrom || options.dateTo) {
+            filtered = filtered.filter(article => {
+                const articleDate = new Date(article.publishedDate);
+
+                if (options.dateFrom && articleDate < new Date(options.dateFrom)) {
+                    return false;
                 }
 
-                if (title && title.length > 10) {
-                    return title;
+                if (options.dateTo && articleDate > new Date(options.dateTo)) {
+                    return false;
                 }
+
+                return true;
+            });
+        }
+
+        // Limit results
+        if (options.limit && options.limit > 0) {
+            filtered = filtered.slice(0, options.limit);
+        }
+
+        return filtered;
+    }
+
+    /**
+     * Validate URL format and security
+     * @param {string} url - URL to validate
+     */
+    validateUrl(url) {
+        if (!url || typeof url !== 'string') {
+            throw new ValidationError('URL must be a non-empty string');
+        }
+
+        try {
+            const urlObj = new URL(url);
+
+            if (!['http:', 'https:'].includes(urlObj.protocol)) {
+                throw new ValidationError('Only HTTP and HTTPS protocols are supported');
             }
-        }
 
-        // Fallback: lấy text đầu tiên có độ dài phù hợp
-        const fallbackTitle = $element.find('a').first().text().trim();
-        return fallbackTitle.length > 10 ? fallbackTitle : 'Untitled Article';
+        } catch (error) {
+            throw new ValidationError(`Invalid URL format: ${error.message}`);
+        }
     }
 
     /**
-     * Extract URL from article element
-     * @param {object} $ - Cheerio instance
-     * @param {object} $element - Article element
-     * @param {string} baseUrl - Base URL
-     * @returns {string} - Article URL
+     * Update internal statistics
+     * @param {boolean} success - Whether operation was successful
+     * @param {number} responseTime - Response time in milliseconds
      */
-    extractUrl($, $element, baseUrl) {
-        // Tìm link đầu tiên trong element
-        const linkElement = $element.find('a[href]').first();
+    updateStats(success, responseTime) {
+        this.stats.totalRequests++;
+        this.stats.lastActivity = new Date().toISOString();
 
-        if (linkElement.length > 0) {
-            const href = linkElement.attr('href');
-            return makeAbsoluteUrl(href, baseUrl);
+        if (success) {
+            this.stats.successfulScrapes++;
+        } else {
+            this.stats.failedScrapes++;
         }
 
-        // Fallback: kiểm tra chính element có href không
-        if ($element.attr('href')) {
-            return makeAbsoluteUrl($element.attr('href'), baseUrl);
-        }
-
-        return baseUrl; // Fallback to base URL
+        // Update average response time
+        const totalTime = this.stats.averageResponseTime * (this.stats.totalRequests - 1) + responseTime;
+        this.stats.averageResponseTime = Math.round(totalTime / this.stats.totalRequests);
     }
 
     /**
-     * Extract description from article element
-     * @param {object} $ - Cheerio instance
-     * @param {object} $element - Article element
-     * @returns {string} - Article description
+     * Get scraping statistics
+     * @returns {object} - Statistics object
      */
-    extractDescription($, $element) {
-        const descriptionSelectors = [
-            '.excerpt', '.summary', '.description',
-            '.post-excerpt', '.entry-summary',
-            'p', '.content'
-        ];
-
-        for (const selector of descriptionSelectors) {
-            const descElement = $element.find(selector).first();
-            if (descElement.length > 0) {
-                const desc = cleanText(stripHtml(descElement.html()));
-                if (desc && desc.length > 30) {
-                    return desc;
-                }
-            }
-        }
-
-        // Fallback: lấy text content của toàn bộ element
-        const fullText = cleanText($element.text());
-        return fullText.length > 100 ? fullText.substring(0, 200) + '...' : fullText;
+    getStats() {
+        return {
+            ...this.stats,
+            successRate: this.stats.totalRequests > 0 ?
+                Math.round((this.stats.successfulScrapes / this.stats.totalRequests) * 100) : 0
+        };
     }
 
     /**
-     * Extract published date from article element
-     * @param {object} $ - Cheerio instance
-     * @param {object} $element - Article element
-     * @returns {Date|null} - Published date or null
+     * Reset statistics
      */
-    extractDate($, $element) {
-        const dateSelectors = [
-            'time[datetime]',
-            '.date', '.published', '.post-date',
-            '[class*="date"]', '[class*="time"]'
-        ];
-
-        for (const selector of dateSelectors) {
-            const dateElement = $element.find(selector).first();
-            if (dateElement.length > 0) {
-                let dateStr = dateElement.attr('datetime') || dateElement.text();
-                const date = new Date(dateStr);
-
-                if (!isNaN(date.getTime())) {
-                    return date;
-                }
-            }
-        }
-
-        // Fallback: current date
-        return new Date();
+    resetStats() {
+        this.stats = {
+            totalRequests: 0,
+            successfulScrapes: 0,
+            failedScrapes: 0,
+            averageResponseTime: 0,
+            lastActivity: null
+        };
     }
 
     /**
-     * Extract image from article element
-     * @param {object} $ - Cheerio instance
-     * @param {object} $element - Article element
-     * @param {string} baseUrl - Base URL
-     * @returns {string|null} - Image URL or null
+     * Add custom parsing rules for a specific domain
+     * @param {string} domain - Domain name
+     * @param {object} rules - Parsing rules
      */
-    extractImage($, $element, baseUrl) {
-        const imgElement = $element.find('img').first();
-
-        if (imgElement.length > 0) {
-            const src = imgElement.attr('src') || imgElement.attr('data-src');
-            if (src) {
-                return makeAbsoluteUrl(src, baseUrl);
-            }
-        }
-
-        return null;
+    addParsingRules(domain, rules) {
+        this.parserService.addSiteRules(domain, rules);
+        logWithTimestamp(`Added custom parsing rules for domain: ${domain}`);
     }
 
     /**
-     * Validate if article has minimum required data
-     * @param {object} article - Article object
-     * @returns {boolean} - True if valid
+     * Get current service configuration
+     * @returns {object} - Configuration object
      */
-    isValidArticle(article) {
-        return (
-            article &&
-            article.title &&
-            article.title.length > 10 &&
-            article.url &&
-            article.description &&
-            article.description.length > 20
-        );
+    getConfig() {
+        return {
+            httpService: this.httpService.getStats(),
+            supportedSites: Object.keys(this.parserService.siteRules),
+            stats: this.getStats()
+        };
     }
 }
 
+// Export singleton instance
 module.exports = new ScraperService();

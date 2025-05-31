@@ -1,7 +1,7 @@
 // src/routes/index.js
 const express = require('express');
 const feedController = require('../controllers/feedController');
-const { validateRequest } = require('../middleware');
+const ValidationService = require('../validators');
 
 const router = express.Router();
 
@@ -10,80 +10,159 @@ const router = express.Router();
  */
 
 // Main feed generation endpoint
-router.get('/feed', validateRequest, feedController.generateFeed);
+router.get('/feed',
+    ValidationService.validateFeedRequest,
+    feedController.generateFeed
+);
 
 // Get feed metadata
-router.get('/metadata', validateRequest, feedController.getFeedMetadata);
+router.get('/metadata',
+    ValidationService.validateFeedRequest,
+    feedController.getFeedMetadata
+);
 
 // Preview articles (for testing/debugging)
-router.get('/preview', validateRequest, feedController.previewArticles);
+router.get('/preview',
+    ValidationService.validateFeedRequest,
+    ValidationService.validatePagination,
+    feedController.previewArticles
+);
 
 /**
  * System and Utility Routes
  */
 
-// Health check
+// Health check (no validation needed)
 router.get('/health', feedController.healthCheck);
 
-// API information
+// API information (no validation needed)
 router.get('/api/info', feedController.getApiInfo);
 
 // Website validation
-router.post('/validate', feedController.validateWebsite);
+router.post('/validate',
+    ValidationService.validateWebsiteRequest,
+    feedController.validateWebsite
+);
 
 /**
  * Cache Management Routes
  */
 
-// Get cache statistics
+// Get cache statistics (no validation needed)
 router.get('/cache/stats', feedController.getCacheStats);
 
 // Clear cache
-router.delete('/cache', feedController.clearCache);
+router.delete('/cache',
+    ValidationService.validateCacheRequest,
+    feedController.clearCache
+);
 
 /**
  * Root endpoint - API documentation
  */
 router.get('/', (req, res) => {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+
     res.json({
         name: 'RSS Feed Generator API',
         version: '1.0.0',
         description: 'Generate RSS feeds from websites that don\'t provide them',
 
+        status: 'operational',
+        timestamp: new Date().toISOString(),
+
         quickStart: {
             generateFeed: {
                 method: 'GET',
                 endpoint: '/feed?url=<website_url>',
-                example: `${req.protocol}://${req.get('host')}/feed?url=https://example.com`,
+                example: `${baseUrl}/feed?url=https://example.com`,
                 description: 'Generate RSS feed for any website'
             },
 
             previewArticles: {
                 method: 'GET',
-                endpoint: '/preview?url=<website_url>',
-                example: `${req.protocol}://${req.get('host')}/preview?url=https://example.com`,
+                endpoint: '/preview?url=<website_url>&limit=<number>',
+                example: `${baseUrl}/preview?url=https://example.com&limit=5`,
                 description: 'Preview articles before generating feed'
             }
         },
 
         endpoints: [
-            'GET /feed - Generate RSS feed',
-            'GET /metadata - Get feed metadata',
-            'GET /preview - Preview articles',
-            'GET /health - System health check',
-            'GET /api/info - Detailed API documentation',
-            'POST /validate - Validate website URL',
-            'GET /cache/stats - Cache statistics',
-            'DELETE /cache - Clear cache'
+            {
+                path: 'GET /feed',
+                description: 'Generate RSS feed',
+                parameters: {
+                    url: 'Website URL (required)',
+                    title: 'Custom feed title (optional, max 100 chars)',
+                    description: 'Custom feed description (optional, max 500 chars)',
+                    limit: 'Number of articles (optional, 1-50)'
+                }
+            },
+            {
+                path: 'GET /metadata',
+                description: 'Get feed metadata',
+                parameters: {
+                    url: 'Website URL (required)'
+                }
+            },
+            {
+                path: 'GET /preview',
+                description: 'Preview articles',
+                parameters: {
+                    url: 'Website URL (required)',
+                    limit: 'Number of articles (optional, 1-50)',
+                    page: 'Page number (optional, for pagination)'
+                }
+            },
+            {
+                path: 'GET /health',
+                description: 'System health check',
+                parameters: {}
+            },
+            {
+                path: 'GET /api/info',
+                description: 'Detailed API documentation',
+                parameters: {}
+            },
+            {
+                path: 'POST /validate',
+                description: 'Validate website URL',
+                body: {
+                    url: 'Website URL to validate (required)'
+                }
+            },
+            {
+                path: 'GET /cache/stats',
+                description: 'Cache statistics',
+                parameters: {}
+            },
+            {
+                path: 'DELETE /cache',
+                description: 'Clear cache',
+                parameters: {
+                    url: 'Website URL to clear (optional, clears all if not provided)'
+                }
+            }
         ],
 
-        documentation: `${req.protocol}://${req.get('host')}/api/info`,
+        features: [
+            'Automatic content extraction from any website',
+            'RSS 2.0 compatible feeds',
+            'Intelligent article detection',
+            'Caching for improved performance',
+            'Rate limiting for fair usage',
+            'Input validation and security checks',
+            'Support for multiple content formats',
+            'Customizable feed metadata'
+        ],
 
-        usage: {
-            basicFeed: `${req.protocol}://${req.get('host')}/feed?url=https://vnexpress.net`,
-            customTitle: `${req.protocol}://${req.get('host')}/feed?url=https://vnexpress.net&title=VnExpress RSS`,
-            preview: `${req.protocol}://${req.get('host')}/preview?url=https://vnexpress.net&limit=5`
-        },
+        limitations: [
+            'JavaScript-heavy sites may not work perfectly',
+            'Some sites may block automated requests',
+            'Feed updates depend on cache duration',
+            'Rate limits apply to prevent abuse',
+            'Private/local URLs blocked for security'
+        ],
 
         rateLimit: {
             windowMs: 15 * 60 * 1000, // 15 minutes
@@ -93,13 +172,17 @@ router.get('/', (req, res) => {
 
         caching: {
             duration: '1 hour',
-            note: 'Feeds are cached to improve performance'
+            note: 'Feeds are cached to improve performance and reduce load on target websites'
         },
 
         support: {
-            email: 'support@example.com',
-            documentation: 'https://github.com/your-repo/rss-feed-generator',
-            issues: 'https://github.com/your-repo/rss-feed-generator/issues'
+            documentation: `${baseUrl}/api/info`,
+            healthCheck: `${baseUrl}/health`,
+            examples: {
+                basicFeed: `${baseUrl}/feed?url=https://example.com`,
+                customTitle: `${baseUrl}/feed?url=https://example.com&title=My Custom Feed`,
+                preview: `${baseUrl}/preview?url=https://example.com&limit=5`
+            }
         }
     });
 });
@@ -109,22 +192,35 @@ router.get('/', (req, res) => {
  */
 
 // Alternative feed route (some feed readers expect /rss)
-router.get('/rss', validateRequest, feedController.generateFeed);
+router.get('/rss',
+    ValidationService.validateFeedRequest,
+    feedController.generateFeed
+);
 
 // Alternative feed route (some expect /feeds)
-router.get('/feeds', validateRequest, feedController.generateFeed);
+router.get('/feeds',
+    ValidationService.validateFeedRequest,
+    feedController.generateFeed
+);
 
-// Atom feed support (returns RSS but with different content-type)
-router.get('/atom', validateRequest, (req, res, next) => {
-    // Set atom content type before processing
-    const originalSend = res.send;
-    res.send = function(data) {
-        res.set('Content-Type', 'application/atom+xml; charset=utf-8');
-        return originalSend.call(this, data);
-    };
+// Atom feed support (returns RSS but with atom content-type)
+router.get('/atom',
+    ValidationService.validateFeedRequest,
+    (req, res, next) => {
+        // Store original send method
+        const originalSend = res.send;
 
-    feedController.generateFeed(req, res, next);
-});
+        // Override send to set atom content type
+        res.send = function(data) {
+            if (!res.headersSent) {
+                res.set('Content-Type', 'application/atom+xml; charset=utf-8');
+            }
+            return originalSend.call(this, data);
+        };
+
+        feedController.generateFeed(req, res, next);
+    }
+);
 
 /**
  * Debug routes (only available in development)
@@ -132,33 +228,30 @@ router.get('/atom', validateRequest, (req, res, next) => {
 if (process.env.NODE_ENV === 'development') {
 
     // Debug: Show extracted raw data
-    router.get('/debug/extract', validateRequest, async (req, res, next) => {
-        try {
-            const { url } = req.query;
+    router.get('/debug/extract',
+        ValidationService.validateFeedRequest,
+        async (req, res, next) => {
+            try {
+                const { url } = req.validatedQuery;
+                const scraperService = require('../services/scraperService');
 
-            if (!url) {
-                return res.status(400).json({
-                    error: 'URL parameter required'
+                const html = await scraperService.fetchHtml(url);
+                const articles = await scraperService.extractArticles(url);
+
+                res.json({
+                    debug: true,
+                    url: url,
+                    htmlLength: html.length,
+                    articlesExtracted: articles.length,
+                    articles: articles.slice(0, 5), // Limit for debug
+                    timestamp: new Date().toISOString()
                 });
+
+            } catch (error) {
+                next(error);
             }
-
-            const scraperService = require('../services/scraperService');
-            const html = await scraperService.fetchHtml(url);
-            const articles = await scraperService.extractArticles(url);
-
-            res.json({
-                debug: true,
-                url: url,
-                htmlLength: html.length,
-                articlesExtracted: articles.length,
-                articles: articles,
-                timestamp: new Date().toISOString()
-            });
-
-        } catch (error) {
-            next(error);
         }
-    });
+    );
 
     // Debug: Test HTML parsing
     router.post('/debug/parse', async (req, res, next) => {
@@ -167,7 +260,9 @@ if (process.env.NODE_ENV === 'development') {
 
             if (!html) {
                 return res.status(400).json({
-                    error: 'HTML content required in request body'
+                    error: true,
+                    message: 'HTML content required in request body',
+                    code: 'MISSING_HTML'
                 });
             }
 
@@ -189,7 +284,8 @@ if (process.env.NODE_ENV === 'development') {
                 htmlLength: html.length,
                 elementsFound: articleElements.length,
                 articlesExtracted: articles.length,
-                articles: articles
+                articles: articles,
+                timestamp: new Date().toISOString()
             });
 
         } catch (error) {
