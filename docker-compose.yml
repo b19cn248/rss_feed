@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  rss-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rss-feed-generator
+
+    # Port mapping
+    ports:
+      - "3000:3000"
+
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      # Override từ .env file nếu có
+      - PORT=${PORT:-3000}
+      - BASE_URL=${BASE_URL:-http://localhost:3000}
+      - CACHE_DURATION=${CACHE_DURATION:-3600}
+      - MAX_ARTICLES_PER_FEED=${MAX_ARTICLES_PER_FEED:-20}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-10000}
+      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-900000}
+      - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-100}
+
+    # Volumes for persistence
+    volumes:
+      # Logs persistence
+      - ./logs:/app/logs
+      # Data persistence (cache, etc)
+      - rss-data:/app/data
+      # Temp files
+      - /tmp:/app/tmp
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check (override Dockerfile's if needed)
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Development configuration (optional)
+  rss-generator-dev:
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder  # Use builder stage for development
+    container_name: rss-feed-generator-dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    volumes:
+      # Mount source code for hot reload
+      - .:/app
+      - /app/node_modules  # Prevent overwriting node_modules
+      - ./logs:/app/logs
+    command: npm run dev  # Assuming you have a dev script
+    restart: unless-stopped
+
+# Named volumes
+volumes:
+  rss-data:
+    driver: local
