@@ -1,12 +1,36 @@
 {
-  "name": "rss_feed",
+  "name": "rss-feed-generator",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Generate RSS feeds from websites that don't provide them",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node scripts/start.js",
+    "dev": "nodemon server.js",
+    "setup": "node scripts/setup.js",
+    "test": "node tests/examples.js",
+    "test:examples": "node tests/examples.js --examples",
+    "prod": "NODE_ENV=production node scripts/start.js",
+    "lint": "echo 'Linting not configured yet'",
+    "validate": "node -e \"require('./config').validate(); console.log('✅ Configuration valid')\"",
+    "clean": "rm -rf logs/* tmp/*"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": ""
+  "keywords": ["rss", "feed", "generator", "web-scraping"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cheerio": "^1.0.0-rc.12",
+    "axios": "^1.6.0",
+    "rss": "^1.2.2",
+    "node-cron": "^3.0.3",
+    "helmet": "^7.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
 }
