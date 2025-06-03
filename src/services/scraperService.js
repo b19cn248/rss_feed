@@ -1,24 +1,29 @@
-// src/services/scraperService.js
+// src/services/scraperService.js (COMPLETE FIXED VERSION)
 const httpService = require('./httpService');
 const contentParserService = require('./contentParserService');
+const advancedRSSDetector = require('./advancedRSSDetector'); // 🆕 FIXED
 const { logWithTimestamp, makeAbsoluteUrl } = require('../utils/helpers');
 const { ScrapingError, ValidationError } = require('../errors');
 
 /**
- * Scraper Service (Enhanced with RSS Detection)
- * Orchestrates HTTP fetching, RSS detection, and content parsing
+ * Scraper Service (FIXED) - Proper URL handling and early exit RSS detection
+ * Now correctly handles URL paths and uses fixed RSS detector
  */
 class ScraperService {
     constructor() {
         this.httpService = httpService;
         this.parserService = contentParserService;
+        this.rssDetector = advancedRSSDetector; // 🆕 FIXED
 
-        // Statistics tracking
+        // Enhanced statistics tracking
         this.stats = {
             totalRequests: 0,
             successfulScrapes: 0,
             failedScrapes: 0,
             rssDetected: 0,
+            rssUsed: 0, // NEW: Track how many times RSS was actually used
+            htmlScrapeUsed: 0, // NEW: Track HTML scraping usage
+            cacheHits: 0,
             averageResponseTime: 0,
             lastActivity: null
         };
@@ -27,7 +32,7 @@ class ScraperService {
     /**
      * Extract articles from a website
      * Main public method that orchestrates the scraping process
-     * @param {string} url - Website URL to scrape
+     * @param {string} url - Website URL to scrape (KEEP ORIGINAL PATH!)
      * @param {object} options - Scraping options
      * @returns {Promise<Array>} - Array of article objects
      */
@@ -35,10 +40,33 @@ class ScraperService {
         const startTime = Date.now();
 
         try {
-            // Validate URL
+            // Validate URL (but keep original path!)
             this.validateUrl(url);
 
             logWithTimestamp(`Starting article extraction from: ${url}`);
+
+            // 🔍 STEP 1: Try to find existing RSS feed first (FIXED)
+            const rssUrl = await this.findExistingRSSFeed(url);
+
+            if (rssUrl) {
+                logWithTimestamp(`✅ Using existing RSS feed: ${rssUrl}`);
+
+                // Parse RSS feed
+                const rssContent = await this.fetchRSSContent(rssUrl);
+                const articles = await this.parseRSSFeed(rssContent, url);
+
+                // Apply filters
+                const filteredArticles = this.applyFilters(articles, options);
+
+                this.stats.rssUsed++;
+                this.updateStats(true, Date.now() - startTime);
+
+                logWithTimestamp(`✅ Successfully extracted ${filteredArticles.length} articles from RSS in ${Date.now() - startTime}ms`);
+                return filteredArticles;
+            }
+
+            // 🔄 STEP 2: Fallback to HTML scraping
+            logWithTimestamp(`📄 No RSS found, falling back to HTML scraping for: ${url}`);
 
             // Fetch HTML content
             const html = await this.fetchHtml(url, options);
@@ -46,160 +74,134 @@ class ScraperService {
             // Parse and extract articles
             const articles = await this.parseArticles(html, url, options);
 
-            // Update statistics
+            // Apply filters
+            const filteredArticles = this.applyFilters(articles, options);
+
+            this.stats.htmlScrapeUsed++;
             this.updateStats(true, Date.now() - startTime);
 
-            logWithTimestamp(`Successfully extracted ${articles.length} articles from ${url} in ${Date.now() - startTime}ms`);
-
-            return articles;
+            logWithTimestamp(`✅ Successfully extracted ${filteredArticles.length} articles from HTML in ${Date.now() - startTime}ms`);
+            return filteredArticles;
 
         } catch (error) {
             this.updateStats(false, Date.now() - startTime);
-            logWithTimestamp(`Failed to extract articles from ${url}: ${error.message}`, 'error');
+            logWithTimestamp(`❌ Failed to extract articles from ${url}: ${error.message}`, 'error');
             throw error;
         }
     }
 
     /**
-     * 🆕 Find existing RSS feed from website
-     * @param {string} url - Website URL to check for RSS
+     * 🆕 FIXED: Find existing RSS feed using advanced detection with proper URL handling
+     * @param {string} url - Website URL to check for RSS (KEEP ORIGINAL PATH!)
      * @returns {Promise<string|null>} - RSS URL if found, null otherwise
      */
     async findExistingRSSFeed(url) {
         try {
-            logWithTimestamp(`Searching for existing RSS feed at ${url}`);
+            logWithTimestamp(`🔍 Checking for existing RSS feed at ${url}`);
 
-            // Fetch HTML from the main page
-            const html = await this.fetchHtml(url);
-            const cheerio = require('cheerio');
-            const $ = cheerio.load(html);
+            // Use the FIXED advanced RSS detector
+            const rssUrl = await this.rssDetector.findRSSFeed(url);
 
-            // Common RSS/Atom feed selectors in <head>
-            const rssSelectors = [
-                'link[type="application/rss+xml"]',
-                'link[type="application/atom+xml"]',
-                'link[rel="alternate"][type="application/rss+xml"]',
-                'link[rel="alternate"][type="application/atom+xml"]',
-                'link[rel="feed"]',
-                'link[title*="RSS"]',
-                'link[title*="Feed"]'
-            ];
-
-            // Search for RSS links
-            for (const selector of rssSelectors) {
-                const $links = $(selector);
-
-                for (let i = 0; i < $links.length; i++) {
-                    const $link = $($links[i]);
-                    const href = $link.attr('href');
-                    const title = $link.attr('title') || '';
-
-                    if (href) {
-                        const rssUrl = makeAbsoluteUrl(href, url);
-                        logWithTimestamp(`Found potential RSS link: ${rssUrl} (${title})`);
-
-                        // Validate this RSS URL
-                        if (await this.validateRSSUrl(rssUrl)) {
-                            logWithTimestamp(`✅ Valid RSS feed found: ${rssUrl}`);
-                            this.stats.rssDetected++;
-                            return rssUrl;
-                        }
-                    }
-                }
+            if (rssUrl) {
+                this.stats.rssDetected++;
+                logWithTimestamp(`✅ RSS feed found: ${rssUrl}`);
+                return rssUrl;
             }
 
-            // Additional check: Look for common RSS paths
-            const commonRSSPaths = [
-                '/rss',
-                '/rss.xml',
-                '/feed',
-                '/feed.xml',
-                '/feeds',
-                '/atom.xml',
-                '/index.xml'
-            ];
-
-            for (const path of commonRSSPaths) {
-                try {
-                    const rssUrl = new URL(path, url).href;
-                    if (await this.validateRSSUrl(rssUrl)) {
-                        logWithTimestamp(`✅ Valid RSS feed found at common path: ${rssUrl}`);
-                        this.stats.rssDetected++;
-                        return rssUrl;
-                    }
-                } catch (error) {
-                    // Continue checking other paths
-                }
-            }
-
-            logWithTimestamp(`No existing RSS feed found for ${url}`);
+            logWithTimestamp(`❌ No RSS feed found for ${url}`);
             return null;
 
         } catch (error) {
-            logWithTimestamp(`Error searching for RSS feed at ${url}: ${error.message}`, 'warn');
+            logWithTimestamp(`⚠️  RSS detection error for ${url}: ${error.message}`, 'warn');
             return null;
         }
     }
 
     /**
-     * 🆕 Validate if URL returns a valid RSS/Atom feed
-     * @param {string} rssUrl - URL to validate as RSS feed
-     * @returns {Promise<boolean>} - True if valid RSS feed
+     * Parse RSS feed content into articles
+     * @param {string} rssContent - RSS XML content
+     * @param {string} baseUrl - Base URL for resolving relative links
+     * @returns {Promise<Array>} - Array of articles
      */
-    async validateRSSUrl(rssUrl) {
+    async parseRSSFeed(rssContent, baseUrl) {
         try {
-            // Quick HEAD request first to check content type
-            const headCheck = await this.httpService.checkUrl(rssUrl);
+            const xml2js = require('xml2js');
+            const parser = new xml2js.Parser({ explicitArray: false });
 
-            if (!headCheck.accessible) {
-                return false;
+            const result = await parser.parseStringPromise(rssContent);
+
+            // Handle both RSS and Atom feeds
+            let items = [];
+
+            if (result.rss && result.rss.channel && result.rss.channel.item) {
+                // RSS 2.0 format
+                items = Array.isArray(result.rss.channel.item) ?
+                    result.rss.channel.item : [result.rss.channel.item];
+            } else if (result.feed && result.feed.entry) {
+                // Atom format
+                items = Array.isArray(result.feed.entry) ?
+                    result.feed.entry : [result.feed.entry];
             }
 
-            // Check content type hints
-            const contentType = headCheck.contentType || '';
-            if (contentType.includes('xml') || contentType.includes('rss') || contentType.includes('atom')) {
-                logWithTimestamp(`RSS URL has promising content-type: ${contentType}`);
-            }
+            const articles = items.map(item => this.parseRSSItem(item, baseUrl));
 
-            // Fetch first few KB to validate RSS structure
-            const response = await this.httpService.fetchHtml(rssUrl);
-
-            if (!response || response.length < 50) {
-                return false;
-            }
-
-            // Basic RSS/Atom validation
-            const content = response.toLowerCase();
-            const isValidRSS =
-                content.includes('<rss') ||
-                content.includes('<feed') ||
-                content.includes('<channel>') ||
-                content.includes('xmlns="http://www.w3.org/2005/atom"') ||
-                content.includes('xmlns:atom=');
-
-            if (isValidRSS) {
-                logWithTimestamp(`RSS structure validation passed for ${rssUrl}`);
-                return true;
-            }
-
-            return false;
+            logWithTimestamp(`📰 Parsed ${articles.length} articles from RSS feed`);
+            return articles;
 
         } catch (error) {
-            logWithTimestamp(`RSS validation failed for ${rssUrl}: ${error.message}`, 'warn');
-            return false;
+            throw new ScrapingError(`Failed to parse RSS feed: ${error.message}`, baseUrl, error);
         }
     }
 
     /**
-     * 🆕 Get RSS feed content with validation
+     * Parse individual RSS item into article format
+     * @param {object} item - RSS item object
+     * @param {string} baseUrl - Base URL
+     * @returns {object} - Article object
+     */
+    parseRSSItem(item, baseUrl) {
+        // Handle both RSS and Atom formats
+        const title = item.title?.$text || item.title || '';
+        const description = item.description?.$text || item.description ||
+            item.summary?.$text || item.summary || '';
+        const link = item.link?.href || item.link || item.guid?.$text || item.guid || '';
+        const pubDate = item.pubDate || item.published || item['dc:date'] || '';
+
+        // Extract image if available
+        let imageUrl = '';
+        if (item.enclosure && item.enclosure.$.type?.startsWith('image/')) {
+            imageUrl = item.enclosure.$.url;
+        } else if (item['media:content'] && item['media:content'].$.type?.startsWith('image/')) {
+            imageUrl = item['media:content'].$.url;
+        } else if (item['media:thumbnail']) {
+            imageUrl = item['media:thumbnail'].$.url;
+        }
+
+        return {
+            title: title.trim(),
+            description: description.trim(),
+            url: makeAbsoluteUrl(link, baseUrl),
+            publishedDate: pubDate ? new Date(pubDate).toISOString() : new Date().toISOString(),
+            imageUrl: imageUrl ? makeAbsoluteUrl(imageUrl, baseUrl) : '',
+            source: 'RSS',
+            category: item.category?.$text || item.category || ''
+        };
+    }
+
+    /**
+     * Get RSS feed content with validation
      * @param {string} rssUrl - RSS feed URL
      * @returns {Promise<string>} - RSS XML content
      */
     async fetchRSSContent(rssUrl) {
         try {
-            logWithTimestamp(`Fetching RSS content from ${rssUrl}`);
+            logWithTimestamp(`📡 Fetching RSS content from ${rssUrl}`);
 
-            const rssContent = await this.httpService.fetchHtml(rssUrl);
+            const rssContent = await this.httpService.fetchHtml(rssUrl, {
+                headers: {
+                    'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*'
+                }
+            });
 
             if (!rssContent || rssContent.length < 100) {
                 throw new ScrapingError('RSS content is too short or empty', rssUrl);
@@ -210,7 +212,7 @@ class ScraperService {
                 throw new ScrapingError('Content does not appear to be valid RSS/Atom feed', rssUrl);
             }
 
-            logWithTimestamp(`Successfully fetched RSS content (${rssContent.length} characters)`);
+            logWithTimestamp(`✅ Successfully fetched RSS content (${rssContent.length} characters)`);
             return rssContent;
 
         } catch (error) {
@@ -299,9 +301,9 @@ class ScraperService {
     }
 
     /**
-     * Check if a website is scrapeable
+     * 🆕 ENHANCED: Check if a website is scrapeable with advanced RSS detection
      * @param {string} url - Website URL
-     * @returns {Promise<object>} - Accessibility status
+     * @returns {Promise<object>} - Enhanced accessibility status
      */
     async checkWebsiteAccessibility(url) {
         try {
@@ -319,8 +321,10 @@ class ScraperService {
                 };
             }
 
-            // Check for existing RSS feed first
+            // 🆕 FIXED RSS detection
             const rssUrl = await this.findExistingRSSFeed(url);
+            const detectionStats = this.rssDetector.getStats();
+
             if (rssUrl) {
                 return {
                     accessible: true,
@@ -329,7 +333,11 @@ class ScraperService {
                     rssUrl: rssUrl,
                     recommendedMethod: 'Use existing RSS feed',
                     contentType: headCheck.contentType,
-                    details: headCheck
+                    details: headCheck,
+                    advancedDetection: {
+                        detectorStats: detectionStats,
+                        supportedDomains: Object.keys(this.rssDetector.domainRules || {}).length
+                    }
                 };
             }
 
@@ -345,7 +353,11 @@ class ScraperService {
                     articleCount: articles.length,
                     recommendedMethod: 'Scrape articles from HTML',
                     contentType: headCheck.contentType,
-                    details: headCheck
+                    details: headCheck,
+                    advancedDetection: {
+                        detectorStats: detectionStats,
+                        attemptedStrategies: 5 // Number of strategies tried
+                    }
                 };
 
             } catch (parseError) {
@@ -355,7 +367,10 @@ class ScraperService {
                     hasRSSFeed: false,
                     reason: 'Could not extract articles from this website',
                     error: parseError.message,
-                    details: headCheck
+                    details: headCheck,
+                    advancedDetection: {
+                        detectorStats: detectionStats
+                    }
                 };
             }
 
@@ -367,44 +382,6 @@ class ScraperService {
                 error: error.message
             };
         }
-    }
-
-    /**
-     * Scrape multiple URLs concurrently
-     * @param {Array<string>} urls - Array of URLs to scrape
-     * @param {object} options - Scraping options
-     * @returns {Promise<Array>} - Array of results
-     */
-    async scrapeMultiple(urls, options = {}) {
-        const { concurrency = 3, continueOnError = true } = options;
-        const results = [];
-
-        logWithTimestamp(`Starting concurrent scraping of ${urls.length} URLs with concurrency ${concurrency}`);
-
-        // Process URLs in chunks
-        for (let i = 0; i < urls.length; i += concurrency) {
-            const chunk = urls.slice(i, i + concurrency);
-
-            const chunkPromises = chunk.map(async (url) => {
-                try {
-                    const articles = await this.extractArticles(url, options);
-                    return { url, success: true, articles, error: null };
-                } catch (error) {
-                    if (!continueOnError) {
-                        throw error;
-                    }
-                    return { url, success: false, articles: [], error: error.message };
-                }
-            });
-
-            const chunkResults = await Promise.all(chunkPromises);
-            results.push(...chunkResults);
-        }
-
-        const successful = results.filter(r => r.success).length;
-        logWithTimestamp(`Completed scraping: ${successful}/${urls.length} successful`);
-
-        return results;
     }
 
     /**
@@ -492,16 +469,39 @@ class ScraperService {
     }
 
     /**
-     * Get scraping statistics (Enhanced with RSS detection stats)
-     * @returns {object} - Statistics object
+     * 🆕 ENHANCED: Get comprehensive scraping statistics
+     * @returns {object} - Enhanced statistics object
      */
     getStats() {
+        const detectorStats = this.rssDetector.getStats();
+
         return {
             ...this.stats,
             successRate: this.stats.totalRequests > 0 ?
                 Math.round((this.stats.successfulScrapes / this.stats.totalRequests) * 100) : 0,
             rssDetectionRate: this.stats.totalRequests > 0 ?
-                Math.round((this.stats.rssDetected / this.stats.totalRequests) * 100) : 0
+                Math.round((this.stats.rssDetected / this.stats.totalRequests) * 100) : 0,
+            rssUsageRate: this.stats.totalRequests > 0 ?
+                Math.round((this.stats.rssUsed / this.stats.totalRequests) * 100) : 0,
+
+            // Advanced detection stats
+            advancedDetection: {
+                ...detectorStats,
+                methodBreakdown: {
+                    htmlHead: detectorStats.htmlHeadDetection,
+                    domainRules: detectorStats.domainRuleDetection,
+                    urlPattern: detectorStats.urlPatternDetection,
+                    commonPaths: detectorStats.commonPathDetection,
+                    wordpress: detectorStats.wordpressDetection
+                }
+            },
+
+            // Usage breakdown
+            usageBreakdown: {
+                rssUsed: this.stats.rssUsed,
+                htmlScrapeUsed: this.stats.htmlScrapeUsed,
+                cacheHits: this.stats.cacheHits
+            }
         };
     }
 
@@ -514,9 +514,15 @@ class ScraperService {
             successfulScrapes: 0,
             failedScrapes: 0,
             rssDetected: 0,
+            rssUsed: 0,
+            htmlScrapeUsed: 0,
+            cacheHits: 0,
             averageResponseTime: 0,
             lastActivity: null
         };
+
+        // Reset detector stats as well
+        this.rssDetector.resetStats();
     }
 
     /**
@@ -530,13 +536,28 @@ class ScraperService {
     }
 
     /**
+     * 🆕 Add custom RSS detection rule for a domain
+     * @param {string} domain - Domain name
+     * @param {Array} patterns - RSS URL patterns
+     */
+    addRSSDetectionRule(domain, patterns) {
+        this.rssDetector.addDomainRule(domain, patterns);
+        logWithTimestamp(`Added RSS detection rule for domain: ${domain}`);
+    }
+
+    /**
      * Get current service configuration
      * @returns {object} - Configuration object
      */
     getConfig() {
         return {
             httpService: this.httpService.getStats(),
-            supportedSites: Object.keys(this.parserService.siteRules),
+            supportedSites: Object.keys(this.parserService.siteRules || {}),
+            rssDetector: {
+                supportedDomains: Object.keys(this.rssDetector.domainRules || {}),
+                strategies: 5, // Number of active strategies
+                cacheSize: this.rssDetector.rssCache ? this.rssDetector.rssCache.size : 0
+            },
             stats: this.getStats()
         };
     }
