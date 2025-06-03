@@ -1,12 +1,12 @@
 // src/services/scraperService.js
 const httpService = require('./httpService');
 const contentParserService = require('./contentParserService');
-const { logWithTimestamp } = require('../utils/helpers');
+const { logWithTimestamp, makeAbsoluteUrl } = require('../utils/helpers');
 const { ScrapingError, ValidationError } = require('../errors');
 
 /**
- * Scraper Service (Refactored)
- * Orchestrates HTTP fetching and content parsing with proper separation of concerns
+ * Scraper Service (Enhanced with RSS Detection)
+ * Orchestrates HTTP fetching, RSS detection, and content parsing
  */
 class ScraperService {
     constructor() {
@@ -18,6 +18,7 @@ class ScraperService {
             totalRequests: 0,
             successfulScrapes: 0,
             failedScrapes: 0,
+            rssDetected: 0,
             averageResponseTime: 0,
             lastActivity: null
         };
@@ -56,6 +57,164 @@ class ScraperService {
             this.updateStats(false, Date.now() - startTime);
             logWithTimestamp(`Failed to extract articles from ${url}: ${error.message}`, 'error');
             throw error;
+        }
+    }
+
+    /**
+     * 🆕 Find existing RSS feed from website
+     * @param {string} url - Website URL to check for RSS
+     * @returns {Promise<string|null>} - RSS URL if found, null otherwise
+     */
+    async findExistingRSSFeed(url) {
+        try {
+            logWithTimestamp(`Searching for existing RSS feed at ${url}`);
+
+            // Fetch HTML from the main page
+            const html = await this.fetchHtml(url);
+            const cheerio = require('cheerio');
+            const $ = cheerio.load(html);
+
+            // Common RSS/Atom feed selectors in <head>
+            const rssSelectors = [
+                'link[type="application/rss+xml"]',
+                'link[type="application/atom+xml"]',
+                'link[rel="alternate"][type="application/rss+xml"]',
+                'link[rel="alternate"][type="application/atom+xml"]',
+                'link[rel="feed"]',
+                'link[title*="RSS"]',
+                'link[title*="Feed"]'
+            ];
+
+            // Search for RSS links
+            for (const selector of rssSelectors) {
+                const $links = $(selector);
+
+                for (let i = 0; i < $links.length; i++) {
+                    const $link = $($links[i]);
+                    const href = $link.attr('href');
+                    const title = $link.attr('title') || '';
+
+                    if (href) {
+                        const rssUrl = makeAbsoluteUrl(href, url);
+                        logWithTimestamp(`Found potential RSS link: ${rssUrl} (${title})`);
+
+                        // Validate this RSS URL
+                        if (await this.validateRSSUrl(rssUrl)) {
+                            logWithTimestamp(`✅ Valid RSS feed found: ${rssUrl}`);
+                            this.stats.rssDetected++;
+                            return rssUrl;
+                        }
+                    }
+                }
+            }
+
+            // Additional check: Look for common RSS paths
+            const commonRSSPaths = [
+                '/rss',
+                '/rss.xml',
+                '/feed',
+                '/feed.xml',
+                '/feeds',
+                '/atom.xml',
+                '/index.xml'
+            ];
+
+            for (const path of commonRSSPaths) {
+                try {
+                    const rssUrl = new URL(path, url).href;
+                    if (await this.validateRSSUrl(rssUrl)) {
+                        logWithTimestamp(`✅ Valid RSS feed found at common path: ${rssUrl}`);
+                        this.stats.rssDetected++;
+                        return rssUrl;
+                    }
+                } catch (error) {
+                    // Continue checking other paths
+                }
+            }
+
+            logWithTimestamp(`No existing RSS feed found for ${url}`);
+            return null;
+
+        } catch (error) {
+            logWithTimestamp(`Error searching for RSS feed at ${url}: ${error.message}`, 'warn');
+            return null;
+        }
+    }
+
+    /**
+     * 🆕 Validate if URL returns a valid RSS/Atom feed
+     * @param {string} rssUrl - URL to validate as RSS feed
+     * @returns {Promise<boolean>} - True if valid RSS feed
+     */
+    async validateRSSUrl(rssUrl) {
+        try {
+            // Quick HEAD request first to check content type
+            const headCheck = await this.httpService.checkUrl(rssUrl);
+
+            if (!headCheck.accessible) {
+                return false;
+            }
+
+            // Check content type hints
+            const contentType = headCheck.contentType || '';
+            if (contentType.includes('xml') || contentType.includes('rss') || contentType.includes('atom')) {
+                logWithTimestamp(`RSS URL has promising content-type: ${contentType}`);
+            }
+
+            // Fetch first few KB to validate RSS structure
+            const response = await this.httpService.fetchHtml(rssUrl);
+
+            if (!response || response.length < 50) {
+                return false;
+            }
+
+            // Basic RSS/Atom validation
+            const content = response.toLowerCase();
+            const isValidRSS =
+                content.includes('<rss') ||
+                content.includes('<feed') ||
+                content.includes('<channel>') ||
+                content.includes('xmlns="http://www.w3.org/2005/atom"') ||
+                content.includes('xmlns:atom=');
+
+            if (isValidRSS) {
+                logWithTimestamp(`RSS structure validation passed for ${rssUrl}`);
+                return true;
+            }
+
+            return false;
+
+        } catch (error) {
+            logWithTimestamp(`RSS validation failed for ${rssUrl}: ${error.message}`, 'warn');
+            return false;
+        }
+    }
+
+    /**
+     * 🆕 Get RSS feed content with validation
+     * @param {string} rssUrl - RSS feed URL
+     * @returns {Promise<string>} - RSS XML content
+     */
+    async fetchRSSContent(rssUrl) {
+        try {
+            logWithTimestamp(`Fetching RSS content from ${rssUrl}`);
+
+            const rssContent = await this.httpService.fetchHtml(rssUrl);
+
+            if (!rssContent || rssContent.length < 100) {
+                throw new ScrapingError('RSS content is too short or empty', rssUrl);
+            }
+
+            // Basic validation
+            if (!rssContent.includes('<rss') && !rssContent.includes('<feed')) {
+                throw new ScrapingError('Content does not appear to be valid RSS/Atom feed', rssUrl);
+            }
+
+            logWithTimestamp(`Successfully fetched RSS content (${rssContent.length} characters)`);
+            return rssContent;
+
+        } catch (error) {
+            throw new ScrapingError(`Failed to fetch RSS content: ${error.message}`, rssUrl, error);
         }
     }
 
@@ -160,7 +319,21 @@ class ScraperService {
                 };
             }
 
-            // If accessible, try to fetch and parse a small sample
+            // Check for existing RSS feed first
+            const rssUrl = await this.findExistingRSSFeed(url);
+            if (rssUrl) {
+                return {
+                    accessible: true,
+                    canScrape: true,
+                    hasRSSFeed: true,
+                    rssUrl: rssUrl,
+                    recommendedMethod: 'Use existing RSS feed',
+                    contentType: headCheck.contentType,
+                    details: headCheck
+                };
+            }
+
+            // If no RSS, try to fetch and parse a small sample
             try {
                 const html = await this.fetchHtml(url);
                 const articles = await this.parseArticles(html, url);
@@ -168,7 +341,9 @@ class ScraperService {
                 return {
                     accessible: true,
                     canScrape: true,
+                    hasRSSFeed: false,
                     articleCount: articles.length,
+                    recommendedMethod: 'Scrape articles from HTML',
                     contentType: headCheck.contentType,
                     details: headCheck
                 };
@@ -177,6 +352,7 @@ class ScraperService {
                 return {
                     accessible: true,
                     canScrape: false,
+                    hasRSSFeed: false,
                     reason: 'Could not extract articles from this website',
                     error: parseError.message,
                     details: headCheck
@@ -316,14 +492,16 @@ class ScraperService {
     }
 
     /**
-     * Get scraping statistics
+     * Get scraping statistics (Enhanced with RSS detection stats)
      * @returns {object} - Statistics object
      */
     getStats() {
         return {
             ...this.stats,
             successRate: this.stats.totalRequests > 0 ?
-                Math.round((this.stats.successfulScrapes / this.stats.totalRequests) * 100) : 0
+                Math.round((this.stats.successfulScrapes / this.stats.totalRequests) * 100) : 0,
+            rssDetectionRate: this.stats.totalRequests > 0 ?
+                Math.round((this.stats.rssDetected / this.stats.totalRequests) * 100) : 0
         };
     }
 
@@ -335,6 +513,7 @@ class ScraperService {
             totalRequests: 0,
             successfulScrapes: 0,
             failedScrapes: 0,
+            rssDetected: 0,
             averageResponseTime: 0,
             lastActivity: null
         };

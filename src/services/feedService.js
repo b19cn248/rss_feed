@@ -1,14 +1,14 @@
 // src/services/feedService.js
 const RSS = require('rss');
-const crypto = require('crypto'); // ✅ THÊM: Crypto module cho hash SHA256
+const crypto = require('crypto');
 const config = require('../../config');
 const scraperService = require('./scraperService');
 const { extractDomain, logWithTimestamp } = require('../utils/helpers');
 const { FeedGenerationError, CacheError, ValidationError, NoArticlesError } = require('../errors');
 
 /**
- * Feed Service (Enhanced với Cache Logic Fixed)
- * Handles RSS feed generation and management with improved error handling and caching
+ * Feed Service (Enhanced with RSS Detection & Priority Logic)
+ * Handles RSS feed generation with priority for existing feeds
  */
 class FeedService {
     constructor() {
@@ -18,19 +18,26 @@ class FeedService {
         this.cacheHits = 0;
         this.cacheMisses = 0;
 
+        // Statistics for RSS detection
+        this.rssStats = {
+            existingRSSUsed: 0,
+            customGeneratedFeeds: 0,
+            totalRequests: 0
+        };
+
         // Cache cleanup interval (every 5 minutes)
         this.setupCacheCleanup();
     }
 
     /**
-     * Generate RSS feed for a website
+     * 🆕 Generate RSS feed with priority for existing feeds
      * @param {string} websiteUrl - URL of the website
      * @param {object} options - Optional configuration
      * @returns {Promise<string>} - RSS XML content
      */
     async generateFeed(websiteUrl, options = {}) {
         try {
-            // Validate and normalize URL - ✅ FIXED: Đừng normalize quá mức
+            // Validate and normalize URL
             const normalizedUrl = this.validateAndNormalizeUrl(websiteUrl);
             const cacheKey = this.getCacheKey(normalizedUrl, options);
 
@@ -42,22 +49,33 @@ class FeedService {
             }
 
             this.cacheMisses++;
+            this.rssStats.totalRequests++;
             logWithTimestamp(`Generating new feed for ${normalizedUrl}`);
 
-            // Extract articles from website
-            const articles = await this.extractArticles(normalizedUrl, options);
+            // 🆕 PRIORITY 1: Try to find and use existing RSS feed
+            const existingRSSContent = await this.tryExistingRSSFeed(normalizedUrl, options);
+            if (existingRSSContent) {
+                // Cache and return existing RSS
+                this.cacheResult(cacheKey, existingRSSContent);
+                this.rssStats.existingRSSUsed++;
 
+                logWithTimestamp(`✅ Using existing RSS feed for ${normalizedUrl}`);
+                return existingRSSContent;
+            }
+
+            // PRIORITY 2: Fallback to scraping and generating custom feed
+            logWithTimestamp(`📄 No existing RSS found, generating custom feed for ${normalizedUrl}`);
+
+            const articles = await this.extractArticles(normalizedUrl, options);
             if (articles.length === 0) {
                 throw new NoArticlesError(normalizedUrl);
             }
 
-            // Create RSS feed
             const rssXml = await this.createRSSFeed(normalizedUrl, articles, options);
-
-            // Cache the result
             this.cacheResult(cacheKey, rssXml);
+            this.rssStats.customGeneratedFeeds++;
 
-            logWithTimestamp(`Successfully generated feed for ${normalizedUrl} with ${articles.length} articles`);
+            logWithTimestamp(`Successfully generated custom feed for ${normalizedUrl} with ${articles.length} articles`);
             return rssXml;
 
         } catch (error) {
@@ -74,6 +92,112 @@ class FeedService {
 
             logWithTimestamp(`Error generating feed for ${websiteUrl}: ${feedError.message}`, 'error');
             throw feedError;
+        }
+    }
+
+    /**
+     * 🆕 Try to find and use existing RSS feed from website
+     * @param {string} websiteUrl - Website URL to check
+     * @param {object} options - Feed options
+     * @returns {Promise<string|null>} - RSS XML content if found, null otherwise
+     */
+    async tryExistingRSSFeed(websiteUrl, options = {}) {
+        try {
+            logWithTimestamp(`🔍 Checking for existing RSS feed at ${websiteUrl}`);
+
+            // Step 1: Detect RSS URL from website
+            const rssUrl = await scraperService.findExistingRSSFeed(websiteUrl);
+
+            if (!rssUrl) {
+                logWithTimestamp(`No existing RSS feed detected for ${websiteUrl}`);
+                return null;
+            }
+
+            logWithTimestamp(`📡 Found existing RSS feed: ${rssUrl}`);
+
+            // Step 2: Fetch RSS content
+            const rssContent = await scraperService.fetchRSSContent(rssUrl);
+
+            // Step 3: Process RSS content if custom options are provided
+            const processedContent = this.processExistingRSS(rssContent, rssUrl, websiteUrl, options);
+
+            logWithTimestamp(`✅ Successfully using existing RSS feed from ${rssUrl}`);
+            return processedContent;
+
+        } catch (error) {
+            logWithTimestamp(`⚠️ Error accessing existing RSS feed for ${websiteUrl}: ${error.message}`, 'warn');
+            logWithTimestamp(`Falling back to custom feed generation`, 'info');
+            return null; // Fallback to scraping
+        }
+    }
+
+    /**
+     * 🆕 Process existing RSS to apply custom options if needed
+     * @param {string} rssContent - Original RSS content
+     * @param {string} rssUrl - RSS feed URL
+     * @param {string} websiteUrl - Original website URL
+     * @param {object} options - Custom options
+     * @returns {string} - Processed RSS content
+     */
+    processExistingRSS(rssContent, rssUrl, websiteUrl, options) {
+        try {
+            // If no custom options, return original RSS as-is
+            if (!options.title && !options.description && !options.limit) {
+                logWithTimestamp(`No custom options, using original RSS as-is`);
+                return rssContent;
+            }
+
+            logWithTimestamp(`Processing existing RSS with custom options: ${JSON.stringify(options)}`);
+
+            // Parse XML to apply custom modifications
+            const cheerio = require('cheerio');
+            const $ = cheerio.load(rssContent, { xmlMode: true });
+
+            // Apply custom title
+            if (options.title) {
+                $('channel > title').text(options.title);
+                $('feed > title').text(options.title); // For Atom feeds
+                logWithTimestamp(`Applied custom title: ${options.title}`);
+            }
+
+            // Apply custom description
+            if (options.description) {
+                $('channel > description').text(options.description);
+                $('feed > subtitle').text(options.description); // For Atom feeds
+                logWithTimestamp(`Applied custom description: ${options.description}`);
+            }
+
+            // Apply limit (remove extra items)
+            if (options.limit && options.limit > 0) {
+                const items = $('item, entry');
+                if (items.length > options.limit) {
+                    items.slice(options.limit).remove();
+                    logWithTimestamp(`Limited RSS to ${options.limit} items (was ${items.length})`);
+                }
+            }
+
+            // Update lastBuildDate and generator
+            $('channel > lastBuildDate').text(new Date().toUTCString());
+            $('channel > generator').text('RSS Feed Generator v1.0 (Enhanced)');
+
+            // Add custom namespace if not exists
+            if (!$('rss').attr('xmlns:atom')) {
+                $('rss').attr('xmlns:atom', 'http://www.w3.org/2005/Atom');
+            }
+
+            // Add self-referencing link
+            const feedUrl = `${config.server.baseUrl}/feed?url=${encodeURIComponent(websiteUrl)}`;
+            const existingSelfLink = $('channel > link[rel="self"]');
+            if (existingSelfLink.length === 0) {
+                $('channel').prepend(`<atom:link href="${feedUrl}" rel="self" type="application/rss+xml" />`);
+            }
+
+            return $.xml();
+
+        } catch (error) {
+            logWithTimestamp(`Error processing existing RSS: ${error.message}`, 'warn');
+            logWithTimestamp(`Returning original RSS content as fallback`);
+            return rssContent; // Return original if processing fails
         }
     }
 
@@ -132,7 +256,7 @@ class FeedService {
                 categories: options.categories || this.inferCategories(articles),
                 pubDate: new Date(),
                 ttl: Math.floor(config.app.cacheDuration / 60), // TTL in minutes
-                generator: 'RSS Feed Generator v1.0',
+                generator: 'RSS Feed Generator v1.0 (Enhanced)',
 
                 // Custom namespace for additional metadata
                 custom_namespaces: {
@@ -144,7 +268,7 @@ class FeedService {
 
                 // RSS 2.0 extensions
                 custom_elements: [
-                    {'generator': 'RSS Feed Generator v1.0'},
+                    {'generator': 'RSS Feed Generator v1.0 (Enhanced)'},
                     {'docs': 'https://validator.w3.org/feed/docs/rss2.html'},
                     {'atom:link': {
                             _attr: {
@@ -262,13 +386,16 @@ class FeedService {
     }
 
     /**
-     * Get feed metadata without generating full content
+     * Get feed metadata without generating full content (Enhanced with RSS detection)
      * @param {string} websiteUrl - Website URL
      * @returns {Promise<object>} - Feed metadata
      */
     async getFeedMetadata(websiteUrl) {
         try {
             const normalizedUrl = this.validateAndNormalizeUrl(websiteUrl);
+
+            // Check for existing RSS first
+            const rssUrl = await scraperService.findExistingRSSFeed(normalizedUrl);
 
             // Get site metadata
             const siteMetadata = await scraperService.getSiteMetadata(normalizedUrl);
@@ -286,7 +413,12 @@ class FeedService {
                 feedUrl: `${config.server.baseUrl}/feed?url=${encodeURIComponent(normalizedUrl)}`,
                 lastUpdated: new Date().toISOString(),
                 articleCount: 0,
-                estimatedUpdateFrequency: 'hourly'
+                estimatedUpdateFrequency: 'hourly',
+
+                // 🆕 RSS detection info
+                hasExistingRSS: !!rssUrl,
+                existingRSSUrl: rssUrl || null,
+                recommendedMethod: rssUrl ? 'Use existing RSS feed' : 'Generate from HTML content'
             };
 
             // Try to get article count quickly (with cache check first)
@@ -297,8 +429,30 @@ class FeedService {
                     const cachedFeed = this.feedCache.get(cacheKey);
                     const articleMatches = cachedFeed.match(/<item>/g);
                     metadata.articleCount = articleMatches ? articleMatches.length : 0;
+                } else if (rssUrl) {
+                    // If RSS exists, try to count from RSS
+                    try {
+                        const rssContent = await scraperService.fetchRSSContent(rssUrl);
+                        const cheerio = require('cheerio');
+                        const $ = cheerio.load(rssContent, { xmlMode: true });
+                        metadata.articleCount = $('item, entry').length;
+
+                        // Get sample articles from RSS
+                        const sampleItems = $('item, entry').slice(0, 3);
+                        metadata.sampleArticles = [];
+                        sampleItems.each((i, elem) => {
+                            const $item = $(elem);
+                            metadata.sampleArticles.push({
+                                title: $item.find('title').text(),
+                                url: $item.find('link').text() || $item.find('link').attr('href'),
+                                publishedDate: $item.find('pubDate, published').text()
+                            });
+                        });
+                    } catch (rssError) {
+                        logWithTimestamp(`Could not analyze RSS feed: ${rssError.message}`, 'warn');
+                    }
                 } else {
-                    // Quick article count
+                    // Quick article count from scraping
                     const articles = await scraperService.extractArticles(normalizedUrl, { limit: 5 });
                     metadata.articleCount = articles.length;
                     metadata.sampleArticles = articles.slice(0, 3).map(a => ({
@@ -321,7 +475,7 @@ class FeedService {
     }
 
     /**
-     * ✅ FIXED: Validate and normalize URL (đừng quá aggressive)
+     * Validate and normalize URL
      * @param {string} url - URL to validate
      * @returns {string} - Normalized URL
      */
@@ -337,15 +491,12 @@ class FeedService {
                 throw new ValidationError('Only HTTP and HTTPS protocols are supported');
             }
 
-            // ✅ FIXED: Normalize ít hơn để giữ path distinction
-            // Chỉ remove trailing slash ở cuối pathname nếu không phải root
+            // Normalize with minimal changes to preserve path distinction
             if (urlObj.pathname !== '/' && urlObj.pathname.endsWith('/')) {
                 urlObj.pathname = urlObj.pathname.slice(0, -1);
             }
 
-            // ⚠️ GIỮ NGUYÊN: search params để URLs khác nhau có cache riêng
-            // urlObj.search = ''; // ❌ REMOVED: Đừng xóa search params
-            urlObj.hash = ''; // Chỉ xóa fragment
+            urlObj.hash = ''; // Remove fragment only
 
             return urlObj.toString();
 
@@ -398,40 +549,33 @@ class FeedService {
     }
 
     /**
-     * ✅ FIXED: Generate cache key với SHA256 hash để tránh collision
+     * Generate cache key with SHA256 hash
      * @param {string} url - Website URL
      * @param {object} options - Feed options
      * @returns {string} - Cache key
      */
     getCacheKey(url, options = {}) {
         try {
-            // ✅ NEW: Sử dụng SHA256 thay vì base64 truncated
             const urlHash = crypto
                 .createHash('sha256')
                 .update(url)
                 .digest('hex')
-                .substring(0, 16); // Lấy 16 ký tự đầu của SHA256 (vẫn unique)
+                .substring(0, 16);
 
-            // Hash options
             const optionsHash = this.hashOptions(options);
-
-            // ✅ NEW: Structure rõ ràng hơn
             const cacheKey = `feed_${urlHash}_${optionsHash}`;
 
-            // Debug log để kiểm tra
             logWithTimestamp(`Generated cache key for ${url}: ${cacheKey}`);
-
             return cacheKey;
 
         } catch (error) {
             logWithTimestamp(`Error generating cache key: ${error.message}`, 'error');
-            // Fallback to timestamp-based key
             return `feed_fallback_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         }
     }
 
     /**
-     * ✅ IMPROVED: Hash options for cache key
+     * Hash options for cache key
      * @param {object} options - Options to hash
      * @returns {string} - Hash string
      */
@@ -443,13 +587,11 @@ class FeedService {
         };
 
         const optionsStr = JSON.stringify(relevantOptions);
-
-        // ✅ NEW: Sử dụng SHA256 cho options cũng
         return crypto
             .createHash('sha256')
             .update(optionsStr)
             .digest('hex')
-            .substring(0, 8); // 8 ký tự đủ cho options
+            .substring(0, 8);
     }
 
     /**
@@ -463,8 +605,6 @@ class FeedService {
 
             if (url) {
                 const normalizedUrl = this.validateAndNormalizeUrl(url);
-
-                // ✅ FIXED: Tìm cache key chính xác cho URL này
                 const targetKey = this.getCacheKey(normalizedUrl, {});
 
                 // Clear exact match
@@ -474,7 +614,7 @@ class FeedService {
                     clearedCount++;
                 }
 
-                // ✅ ENHANCED: Clear tất cả variants của URL này (với options khác nhau)
+                // Clear all variants of URL with different options
                 for (const [key, value] of this.feedCache.entries()) {
                     if (key.includes(this.getCacheKey(normalizedUrl, {}).split('_')[1])) {
                         this.feedCache.delete(key);
@@ -502,7 +642,7 @@ class FeedService {
     }
 
     /**
-     * Get cache statistics with detailed information
+     * Get cache statistics with RSS detection info
      * @returns {object} - Cache stats
      */
     getCacheStats() {
@@ -525,9 +665,18 @@ class FeedService {
             totalHits: this.cacheHits,
             totalMisses: this.cacheMisses,
             totalRequests,
-            entries: cacheEntries.slice(0, 10), // Show only first 10 for brevity
+            entries: cacheEntries.slice(0, 10),
             oldestEntry: cacheEntries.length > 0 ? Math.max(...cacheEntries.map(e => e.age)) : 0,
-            newestEntry: cacheEntries.length > 0 ? Math.min(...cacheEntries.map(e => e.age)) : 0
+            newestEntry: cacheEntries.length > 0 ? Math.min(...cacheEntries.map(e => e.age)) : 0,
+
+            // 🆕 RSS detection statistics
+            rssStats: {
+                totalFeedRequests: this.rssStats.totalRequests,
+                existingRSSUsed: this.rssStats.existingRSSUsed,
+                customGeneratedFeeds: this.rssStats.customGeneratedFeeds,
+                rssUsageRate: this.rssStats.totalRequests > 0 ?
+                    Math.round((this.rssStats.existingRSSUsed / this.rssStats.totalRequests) * 100) + '%' : '0%'
+            }
         };
     }
 
