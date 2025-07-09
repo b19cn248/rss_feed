@@ -96,6 +96,36 @@ class FeedService {
     }
 
     /**
+     * 🆕 Detect RSS feed only (without generating custom feed)
+     * @param {string} websiteUrl - URL of the website
+     * @returns {Promise<string|null>} - RSS URL if found, null otherwise
+     */
+    async detectRSSOnly(websiteUrl) {
+        try {
+            // Validate and normalize URL
+            const normalizedUrl = this.validateAndNormalizeUrl(websiteUrl);
+            
+            logWithTimestamp(`🔍 Detecting RSS feed for ${normalizedUrl}`);
+
+            // Use enhanced RSS detector to find existing RSS
+            const rssDetector = require('./enhancedRSSDetector');
+            const rssUrl = await rssDetector.findRSSFeed(normalizedUrl);
+
+            if (rssUrl) {
+                logWithTimestamp(`✅ RSS feed found: ${rssUrl}`);
+                return rssUrl;
+            } else {
+                logWithTimestamp(`❌ No RSS feed found for ${normalizedUrl}`);
+                return null;
+            }
+
+        } catch (error) {
+            logWithTimestamp(`Error detecting RSS for ${websiteUrl}: ${error.message}`, 'error');
+            throw error;
+        }
+    }
+
+    /**
      * 🆕 Try to find and use existing RSS feed from website
      * @param {string} websiteUrl - Website URL to check
      * @param {object} options - Feed options

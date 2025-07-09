@@ -79,6 +79,44 @@ class FeedController {
     }
 
     /**
+     * Detect RSS feed for a website
+     * GET /detect-rss?url=<website_url>
+     */
+    async detectRSSFeed(req, res, next) {
+        try {
+            const { url } = req.validatedQuery;
+            const requestId = req.requestId;
+
+            logWithTimestamp(`[${requestId}] Detecting RSS feed for: ${url}`);
+
+            // Call service to detect RSS only
+            const rssUrl = await feedService.detectRSSOnly(url);
+
+            // Prepare response
+            const response = {
+                success: true,
+                hasRSS: !!rssUrl,
+                rssUrl: rssUrl || null,
+                websiteUrl: url,
+                message: rssUrl ? 'RSS feed found' : 'Website does not support RSS feed',
+                requestId,
+                timestamp: new Date().toISOString()
+            };
+
+            // Add feed URL for convenience if RSS found
+            if (rssUrl) {
+                response.feedUrl = `${config.server.baseUrl}/feed?url=${encodeURIComponent(url)}`;
+            }
+
+            res.json(response);
+
+        } catch (error) {
+            logWithTimestamp(`[${req.requestId}] Error detecting RSS feed: ${error.message}`, 'error');
+            next(error);
+        }
+    }
+
+    /**
      * Preview articles from a website (for testing)
      * GET /preview?url=<website_url>&limit=<number>&page=<page_number>
      */

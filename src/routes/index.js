@@ -22,6 +22,12 @@ router.get('/metadata',
     (req, res, next) => feedController.getFeedMetadata(req, res, next)
 );
 
+// Detect RSS feed endpoint
+router.get('/detect-rss',
+    ValidationService.validateFeedRequest,
+    (req, res, next) => feedController.detectRSSFeed(req, res, next)
+);
+
 // Preview articles (for testing/debugging)
 router.get('/preview',
     ValidationService.validateFeedRequest,

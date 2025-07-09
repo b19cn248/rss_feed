@@ -1,19 +1,19 @@
-// src/services/scraperService.js (COMPLETE FIXED VERSION)
+// src/services/scraperService.js (UPDATED WITH ENHANCED RSS DETECTOR)
 const httpService = require('./httpService');
 const contentParserService = require('./contentParserService');
-const advancedRSSDetector = require('./advancedRSSDetector'); // 🆕 FIXED
+const enhancedRSSDetector = require('./enhancedRSSDetector'); // 🆕 UPDATED IMPORT
 const { logWithTimestamp, makeAbsoluteUrl } = require('../utils/helpers');
 const { ScrapingError, ValidationError } = require('../errors');
 
 /**
- * Scraper Service (FIXED) - Proper URL handling and early exit RSS detection
- * Now correctly handles URL paths and uses fixed RSS detector
+ * Scraper Service (ENHANCED) - Updated with Enhanced RSS Detection
+ * Now supports comprehensive RSS detection for Vietnamese and international sites
  */
 class ScraperService {
     constructor() {
         this.httpService = httpService;
         this.parserService = contentParserService;
-        this.rssDetector = advancedRSSDetector; // 🆕 FIXED
+        this.rssDetector = enhancedRSSDetector; // 🆕 ENHANCED DETECTOR
 
         // Enhanced statistics tracking
         this.stats = {
@@ -21,18 +21,28 @@ class ScraperService {
             successfulScrapes: 0,
             failedScrapes: 0,
             rssDetected: 0,
-            rssUsed: 0, // NEW: Track how many times RSS was actually used
-            htmlScrapeUsed: 0, // NEW: Track HTML scraping usage
+            rssUsed: 0,
+            htmlScrapeUsed: 0,
             cacheHits: 0,
+            vietnameseSitesProcessed: 0, // 🆕 Track Vietnamese sites
+            internationalSitesProcessed: 0, // 🆕 Track international sites
             averageResponseTime: 0,
             lastActivity: null
         };
+
+        // 🆕 Vietnamese domains tracking for analytics
+        this.vietnameseDomains = new Set([
+            'vnexpress.net', 'tuoitre.vn', 'thanhnien.vn', 'dantri.com.vn',
+            'laodong.vn', 'nhandan.vn', 'tienphong.vn', 'kenh14.vn',
+            'zingnews.vn', 'vietnamnet.vn', 'cand.com.vn', 'baomoi.com',
+            'soha.vn', 'cafef.vn', 'vietnamplus.vn', 'vov.vn'
+        ]);
     }
 
     /**
      * Extract articles from a website
      * Main public method that orchestrates the scraping process
-     * @param {string} url - Website URL to scrape (KEEP ORIGINAL PATH!)
+     * @param {string} url - Website URL to scrape
      * @param {object} options - Scraping options
      * @returns {Promise<Array>} - Array of article objects
      */
@@ -40,33 +50,47 @@ class ScraperService {
         const startTime = Date.now();
 
         try {
-            // Validate URL (but keep original path!)
+            // Validate URL
             this.validateUrl(url);
 
-            logWithTimestamp(`Starting article extraction from: ${url}`);
+            // Track site type for analytics
+            const domain = this.extractDomain(url);
+            if (this.vietnameseDomains.has(domain)) {
+                this.stats.vietnameseSitesProcessed++;
+            } else {
+                this.stats.internationalSitesProcessed++;
+            }
 
-            // 🔍 STEP 1: Try to find existing RSS feed first (FIXED)
+            logWithTimestamp(`🚀 Starting article extraction from: ${url} (${this.getSiteType(domain)})`);
+
+            // 🔍 STEP 1: Try to find existing RSS feed first (ENHANCED)
             const rssUrl = await this.findExistingRSSFeed(url);
 
             if (rssUrl) {
                 logWithTimestamp(`✅ Using existing RSS feed: ${rssUrl}`);
 
-                // Parse RSS feed
-                const rssContent = await this.fetchRSSContent(rssUrl);
-                const articles = await this.parseRSSFeed(rssContent, url);
+                try {
+                    // Parse RSS feed
+                    const rssContent = await this.fetchRSSContent(rssUrl);
+                    const articles = await this.parseRSSFeed(rssContent, url);
 
-                // Apply filters
-                const filteredArticles = this.applyFilters(articles, options);
+                    // Apply filters
+                    const filteredArticles = this.applyFilters(articles, options);
 
-                this.stats.rssUsed++;
-                this.updateStats(true, Date.now() - startTime);
+                    this.stats.rssUsed++;
+                    this.updateStats(true, Date.now() - startTime);
 
-                logWithTimestamp(`✅ Successfully extracted ${filteredArticles.length} articles from RSS in ${Date.now() - startTime}ms`);
-                return filteredArticles;
+                    logWithTimestamp(`✅ Successfully extracted ${filteredArticles.length} articles from RSS in ${Date.now() - startTime}ms`);
+                    return filteredArticles;
+
+                } catch (rssError) {
+                    // Log RSS error but continue with HTML scraping
+                    logWithTimestamp(`⚠️ RSS parsing failed for ${rssUrl}: ${rssError.message}, falling back to HTML scraping`, 'warn');
+                }
             }
 
             // 🔄 STEP 2: Fallback to HTML scraping
-            logWithTimestamp(`📄 No RSS found, falling back to HTML scraping for: ${url}`);
+            logWithTimestamp(`📄 No valid RSS found, falling back to HTML scraping for: ${url}`);
 
             // Fetch HTML content
             const html = await this.fetchHtml(url, options);
@@ -91,28 +115,29 @@ class ScraperService {
     }
 
     /**
-     * 🆕 FIXED: Find existing RSS feed using advanced detection with proper URL handling
-     * @param {string} url - Website URL to check for RSS (KEEP ORIGINAL PATH!)
+     * 🆕 ENHANCED: Find existing RSS feed using enhanced detection
+     * @param {string} url - Website URL to check for RSS
      * @returns {Promise<string|null>} - RSS URL if found, null otherwise
      */
     async findExistingRSSFeed(url) {
         try {
-            logWithTimestamp(`🔍 Checking for existing RSS feed at ${url}`);
+            const domain = this.extractDomain(url);
+            logWithTimestamp(`🔍 [Enhanced] Checking for existing RSS feed at ${url} (${this.getSiteType(domain)})`);
 
-            // Use the FIXED advanced RSS detector
+            // Use the ENHANCED RSS detector
             const rssUrl = await this.rssDetector.findRSSFeed(url);
 
             if (rssUrl) {
                 this.stats.rssDetected++;
-                logWithTimestamp(`✅ RSS feed found: ${rssUrl}`);
+                logWithTimestamp(`✅ Enhanced RSS detection success: ${rssUrl}`);
                 return rssUrl;
             }
 
-            logWithTimestamp(`❌ No RSS feed found for ${url}`);
+            logWithTimestamp(`❌ No RSS feed found for ${url} after enhanced detection`);
             return null;
 
         } catch (error) {
-            logWithTimestamp(`⚠️  RSS detection error for ${url}: ${error.message}`, 'warn');
+            logWithTimestamp(`⚠️ Enhanced RSS detection error for ${url}: ${error.message}`, 'warn');
             return null;
         }
     }
@@ -126,27 +151,49 @@ class ScraperService {
     async parseRSSFeed(rssContent, baseUrl) {
         try {
             const xml2js = require('xml2js');
-            const parser = new xml2js.Parser({ explicitArray: false });
+            const parser = new xml2js.Parser({
+                explicitArray: false,
+                ignoreAttrs: false,
+                mergeAttrs: true
+            });
 
             const result = await parser.parseStringPromise(rssContent);
 
             // Handle both RSS and Atom feeds
             let items = [];
+            let feedTitle = '';
+            let feedDescription = '';
 
-            if (result.rss && result.rss.channel && result.rss.channel.item) {
+            if (result.rss && result.rss.channel) {
                 // RSS 2.0 format
-                items = Array.isArray(result.rss.channel.item) ?
-                    result.rss.channel.item : [result.rss.channel.item];
-            } else if (result.feed && result.feed.entry) {
+                const channel = result.rss.channel;
+                feedTitle = channel.title || '';
+                feedDescription = channel.description || '';
+
+                if (channel.item) {
+                    items = Array.isArray(channel.item) ? channel.item : [channel.item];
+                }
+            } else if (result.feed) {
                 // Atom format
-                items = Array.isArray(result.feed.entry) ?
-                    result.feed.entry : [result.feed.entry];
+                const feed = result.feed;
+                feedTitle = feed.title?.$text || feed.title || '';
+                feedDescription = feed.subtitle?.$text || feed.subtitle || '';
+
+                if (feed.entry) {
+                    items = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+                }
             }
 
             const articles = items.map(item => this.parseRSSItem(item, baseUrl));
 
-            logWithTimestamp(`📰 Parsed ${articles.length} articles from RSS feed`);
-            return articles;
+            // Filter out invalid articles
+            const validArticles = articles.filter(article =>
+                article.title && article.title.length > 5 &&
+                article.url && article.description
+            );
+
+            logWithTimestamp(`📰 Parsed ${validArticles.length}/${items.length} valid articles from RSS feed "${feedTitle}"`);
+            return validArticles;
 
         } catch (error) {
             throw new ScrapingError(`Failed to parse RSS feed: ${error.message}`, baseUrl, error);
@@ -160,36 +207,100 @@ class ScraperService {
      * @returns {object} - Article object
      */
     parseRSSItem(item, baseUrl) {
-        // Handle both RSS and Atom formats
-        const title = item.title?.$text || item.title || '';
-        const description = item.description?.$text || item.description ||
-            item.summary?.$text || item.summary || '';
-        const link = item.link?.href || item.link || item.guid?.$text || item.guid || '';
-        const pubDate = item.pubDate || item.published || item['dc:date'] || '';
+        try {
+            // Handle both RSS and Atom formats with better parsing
+            const title = this.extractTextFromField(item.title);
+            const description = this.extractTextFromField(item.description || item.summary || item.content);
+            const link = this.extractLinkFromField(item.link || item.guid);
+            const pubDate = item.pubDate || item.published || item['dc:date'] || item.updated || '';
+            const author = this.extractTextFromField(item.author || item['dc:creator']);
+            const category = this.extractTextFromField(item.category);
 
-        // Extract image if available
-        let imageUrl = '';
-        if (item.enclosure && item.enclosure.$.type?.startsWith('image/')) {
-            imageUrl = item.enclosure.$.url;
-        } else if (item['media:content'] && item['media:content'].$.type?.startsWith('image/')) {
-            imageUrl = item['media:content'].$.url;
-        } else if (item['media:thumbnail']) {
-            imageUrl = item['media:thumbnail'].$.url;
+            // Extract image with enhanced logic
+            let imageUrl = '';
+
+            // Try various image sources
+            if (item.enclosure && item.enclosure.type?.startsWith('image/')) {
+                imageUrl = item.enclosure.url;
+            } else if (item['media:content'] && item['media:content'].type?.startsWith('image/')) {
+                imageUrl = item['media:content'].url;
+            } else if (item['media:thumbnail']) {
+                imageUrl = item['media:thumbnail'].url;
+            } else if (item.image) {
+                imageUrl = typeof item.image === 'string' ? item.image : item.image.url;
+            }
+
+            // Parse publication date with better handling
+            let publishedDate = new Date();
+            if (pubDate) {
+                try {
+                    publishedDate = new Date(pubDate);
+                    if (isNaN(publishedDate.getTime())) {
+                        publishedDate = new Date();
+                    }
+                } catch (dateError) {
+                    publishedDate = new Date();
+                }
+            }
+
+            return {
+                title: title.trim(),
+                description: description.trim(),
+                url: makeAbsoluteUrl(link, baseUrl),
+                publishedDate: publishedDate.toISOString(),
+                imageUrl: imageUrl ? makeAbsoluteUrl(imageUrl, baseUrl) : '',
+                author: author || '',
+                category: category || '',
+                source: 'RSS',
+                guid: item.guid?.$text || item.guid || item.id || link
+            };
+
+        } catch (error) {
+            logWithTimestamp(`⚠️ Error parsing RSS item: ${error.message}`, 'warn');
+            return {
+                title: 'Error parsing article',
+                description: '',
+                url: baseUrl,
+                publishedDate: new Date().toISOString(),
+                imageUrl: '',
+                author: '',
+                category: '',
+                source: 'RSS',
+                guid: Date.now().toString()
+            };
         }
-
-        return {
-            title: title.trim(),
-            description: description.trim(),
-            url: makeAbsoluteUrl(link, baseUrl),
-            publishedDate: pubDate ? new Date(pubDate).toISOString() : new Date().toISOString(),
-            imageUrl: imageUrl ? makeAbsoluteUrl(imageUrl, baseUrl) : '',
-            source: 'RSS',
-            category: item.category?.$text || item.category || ''
-        };
     }
 
     /**
-     * Get RSS feed content with validation
+     * 🆕 Enhanced text extraction from RSS fields
+     */
+    extractTextFromField(field) {
+        if (!field) return '';
+
+        if (typeof field === 'string') return field;
+        if (field.$text) return field.$text;
+        if (field._) return field._;
+        if (field.content) return field.content;
+
+        return String(field);
+    }
+
+    /**
+     * 🆕 Enhanced link extraction from RSS fields
+     */
+    extractLinkFromField(field) {
+        if (!field) return '';
+
+        if (typeof field === 'string') return field;
+        if (field.href) return field.href;
+        if (field.$text) return field.$text;
+        if (field._) return field._;
+
+        return String(field);
+    }
+
+    /**
+     * Get RSS feed content with enhanced validation
      * @param {string} rssUrl - RSS feed URL
      * @returns {Promise<string>} - RSS XML content
      */
@@ -198,8 +309,12 @@ class ScraperService {
             logWithTimestamp(`📡 Fetching RSS content from ${rssUrl}`);
 
             const rssContent = await this.httpService.fetchHtml(rssUrl, {
+                timeout: 10000, // 10 second timeout for RSS
+                maxRedirects: 5,
                 headers: {
-                    'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*'
+                    'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+                    'User-Agent': 'Mozilla/5.0 (compatible; RSS Reader Bot/1.0; +http://example.com/bot)',
+                    'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8'
                 }
             });
 
@@ -207,8 +322,15 @@ class ScraperService {
                 throw new ScrapingError('RSS content is too short or empty', rssUrl);
             }
 
-            // Basic validation
-            if (!rssContent.includes('<rss') && !rssContent.includes('<feed')) {
+            // Enhanced RSS validation
+            const content = rssContent.toLowerCase();
+            const hasRSSStructure =
+                content.includes('<rss') ||
+                content.includes('<feed') ||
+                content.includes('<channel>') ||
+                content.includes('xmlns="http://www.w3.org/2005/atom"');
+
+            if (!hasRSSStructure) {
                 throw new ScrapingError('Content does not appear to be valid RSS/Atom feed', rssUrl);
             }
 
@@ -228,7 +350,16 @@ class ScraperService {
      */
     async fetchHtml(url, options = {}) {
         try {
-            const html = await this.httpService.fetchHtml(url, options);
+            const html = await this.httpService.fetchHtml(url, {
+                timeout: 8000,
+                maxRedirects: 3,
+                headers: {
+                    'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+                    'Cache-Control': 'no-cache',
+                    ...options.headers
+                },
+                ...options
+            });
 
             if (!html || html.trim().length === 0) {
                 throw new ScrapingError('Empty response received', url);
@@ -261,7 +392,7 @@ class ScraperService {
     }
 
     /**
-     * Get site metadata
+     * Get site metadata with enhanced information
      * @param {string} url - Website URL
      * @returns {Promise<object>} - Site metadata
      */
@@ -269,19 +400,25 @@ class ScraperService {
         try {
             this.validateUrl(url);
 
+            const domain = this.extractDomain(url);
+            const siteType = this.getSiteType(domain);
+
             // Try to get metadata with minimal content first
             const metadata = await this.httpService.getSiteMetadata(url);
 
             if (metadata.title && metadata.description) {
                 return {
                     url,
+                    domain,
+                    siteType,
                     title: metadata.title,
                     description: metadata.description,
                     contentType: metadata.contentType,
                     charset: metadata.charset,
                     generator: metadata.generator,
-                    language: 'en', // Will be extracted from full HTML if needed
-                    lastUpdated: new Date().toISOString()
+                    language: this.detectLanguage(domain),
+                    lastUpdated: new Date().toISOString(),
+                    isVietnamese: this.vietnameseDomains.has(domain)
                 };
             }
 
@@ -291,8 +428,12 @@ class ScraperService {
 
             return {
                 url,
+                domain,
+                siteType,
                 ...fullMetadata,
-                lastUpdated: new Date().toISOString()
+                language: this.detectLanguage(domain),
+                lastUpdated: new Date().toISOString(),
+                isVietnamese: this.vietnameseDomains.has(domain)
             };
 
         } catch (error) {
@@ -301,13 +442,16 @@ class ScraperService {
     }
 
     /**
-     * 🆕 ENHANCED: Check if a website is scrapeable with advanced RSS detection
+     * 🆕 ENHANCED: Check if a website is scrapeable with advanced RSS detection info
      * @param {string} url - Website URL
      * @returns {Promise<object>} - Enhanced accessibility status
      */
     async checkWebsiteAccessibility(url) {
         try {
             this.validateUrl(url);
+
+            const domain = this.extractDomain(url);
+            const siteType = this.getSiteType(domain);
 
             // First, check with HEAD request
             const headCheck = await this.httpService.checkUrl(url);
@@ -317,26 +461,46 @@ class ScraperService {
                     accessible: false,
                     canScrape: false,
                     reason: headCheck.error,
+                    domain,
+                    siteType,
                     details: headCheck
                 };
             }
 
-            // 🆕 FIXED RSS detection
+            // 🆕 ENHANCED RSS detection with detailed info
             const rssUrl = await this.findExistingRSSFeed(url);
             const detectionStats = this.rssDetector.getStats();
 
             if (rssUrl) {
+                // Validate the RSS feed
+                let rssValid = false;
+                let rssArticleCount = 0;
+
+                try {
+                    const rssContent = await this.fetchRSSContent(rssUrl);
+                    const articles = await this.parseRSSFeed(rssContent, url);
+                    rssValid = true;
+                    rssArticleCount = articles.length;
+                } catch (rssError) {
+                    logWithTimestamp(`RSS validation failed: ${rssError.message}`, 'warn');
+                }
+
                 return {
                     accessible: true,
                     canScrape: true,
                     hasRSSFeed: true,
                     rssUrl: rssUrl,
+                    rssValid: rssValid,
+                    rssArticleCount: rssArticleCount,
                     recommendedMethod: 'Use existing RSS feed',
+                    domain,
+                    siteType,
                     contentType: headCheck.contentType,
                     details: headCheck,
-                    advancedDetection: {
+                    enhancedDetection: {
                         detectorStats: detectionStats,
-                        supportedDomains: Object.keys(this.rssDetector.domainRules || {}).length
+                        supportedDomains: Object.keys(this.rssDetector.domainRules || {}).length,
+                        isVietnameseSite: this.vietnameseDomains.has(domain)
                     }
                 };
             }
@@ -352,11 +516,14 @@ class ScraperService {
                     hasRSSFeed: false,
                     articleCount: articles.length,
                     recommendedMethod: 'Scrape articles from HTML',
+                    domain,
+                    siteType,
                     contentType: headCheck.contentType,
                     details: headCheck,
-                    advancedDetection: {
+                    enhancedDetection: {
                         detectorStats: detectionStats,
-                        attemptedStrategies: 5 // Number of strategies tried
+                        attemptedStrategies: 5,
+                        isVietnameseSite: this.vietnameseDomains.has(domain)
                     }
                 };
 
@@ -367,9 +534,12 @@ class ScraperService {
                     hasRSSFeed: false,
                     reason: 'Could not extract articles from this website',
                     error: parseError.message,
+                    domain,
+                    siteType,
                     details: headCheck,
-                    advancedDetection: {
-                        detectorStats: detectionStats
+                    enhancedDetection: {
+                        detectorStats: detectionStats,
+                        isVietnameseSite: this.vietnameseDomains.has(domain)
                     }
                 };
             }
@@ -379,13 +549,15 @@ class ScraperService {
                 accessible: false,
                 canScrape: false,
                 reason: 'Failed to access website',
-                error: error.message
+                error: error.message,
+                domain: this.extractDomain(url),
+                siteType: 'unknown'
             };
         }
     }
 
     /**
-     * Apply filters to articles
+     * Apply filters to articles with enhanced options
      * @param {Array} articles - Articles to filter
      * @param {object} options - Filter options
      * @returns {Array} - Filtered articles
@@ -399,6 +571,14 @@ class ScraperService {
             filtered = filtered.filter(article =>
                 article.title.toLowerCase().includes(keyword) ||
                 article.description.toLowerCase().includes(keyword)
+            );
+        }
+
+        // Filter by category
+        if (options.category) {
+            const category = options.category.toLowerCase();
+            filtered = filtered.filter(article =>
+                article.category && article.category.toLowerCase().includes(category)
             );
         }
 
@@ -419,12 +599,147 @@ class ScraperService {
             });
         }
 
+        // Filter by minimum content length
+        if (options.minContentLength) {
+            filtered = filtered.filter(article =>
+                article.description.length >= options.minContentLength
+            );
+        }
+
+        // Sort by date (newest first) unless specified otherwise
+        if (options.sortBy !== false) {
+            filtered.sort((a, b) => new Date(b.publishedDate) - new Date(a.publishedDate));
+        }
+
         // Limit results
         if (options.limit && options.limit > 0) {
             filtered = filtered.slice(0, options.limit);
         }
 
         return filtered;
+    }
+
+    /**
+     * 🆕 RSS Detection Management Methods
+     */
+
+    /**
+     * Clear RSS detection cache for debugging
+     * @param {string} url - Optional URL to clear, if null clears all
+     */
+    clearRSSCache(url = null) {
+        if (this.rssDetector && this.rssDetector.clearFailedCache) {
+            this.rssDetector.clearFailedCache(url);
+            logWithTimestamp(`🧹 Cleared RSS detection cache${url ? ` for ${url}` : ' (all)'}`);
+        }
+    }
+
+    /**
+     * Add custom RSS detection rule for a domain
+     * @param {string} domain - Domain name
+     * @param {Array} patterns - RSS URL patterns
+     */
+    addRSSDetectionRule(domain, patterns) {
+        if (this.rssDetector && this.rssDetector.addDomainRule) {
+            this.rssDetector.addDomainRule(domain, patterns);
+            logWithTimestamp(`➕ Added RSS detection rule for domain: ${domain}`);
+        }
+    }
+
+    /**
+     * Get RSS detection statistics
+     * @returns {object} - RSS detection stats
+     */
+    getRSSDetectionStats() {
+        if (this.rssDetector && this.rssDetector.getStats) {
+            return this.rssDetector.getStats();
+        }
+        return null;
+    }
+
+    /**
+     * Test RSS detection for a specific URL
+     * @param {string} url - URL to test
+     * @returns {Promise<object>} - Test results
+     */
+    async testRSSDetection(url) {
+        try {
+            const startTime = Date.now();
+            const rssUrl = await this.findExistingRSSFeed(url);
+            const duration = Date.now() - startTime;
+
+            const result = {
+                url,
+                domain: this.extractDomain(url),
+                siteType: this.getSiteType(this.extractDomain(url)),
+                rssUrl,
+                found: !!rssUrl,
+                duration,
+                detectionStats: this.getRSSDetectionStats()
+            };
+
+            if (rssUrl) {
+                // Test RSS validity
+                try {
+                    const rssContent = await this.fetchRSSContent(rssUrl);
+                    const articles = await this.parseRSSFeed(rssContent, url);
+                    result.rssValid = true;
+                    result.articleCount = articles.length;
+                    result.sampleArticles = articles.slice(0, 3).map(a => ({
+                        title: a.title,
+                        url: a.url,
+                        publishedDate: a.publishedDate
+                    }));
+                } catch (rssError) {
+                    result.rssValid = false;
+                    result.rssError = rssError.message;
+                }
+            }
+
+            return result;
+
+        } catch (error) {
+            return {
+                url,
+                found: false,
+                error: error.message,
+                duration: 0
+            };
+        }
+    }
+
+    /**
+     * 🆕 Helper Methods
+     */
+
+    /**
+     * Extract domain from URL
+     */
+    extractDomain(url) {
+        try {
+            return new URL(url).hostname;
+        } catch (error) {
+            return url;
+        }
+    }
+
+    /**
+     * Get site type (Vietnamese/International)
+     */
+    getSiteType(domain) {
+        return this.vietnameseDomains.has(domain) ? 'Vietnamese' : 'International';
+    }
+
+    /**
+     * Detect language based on domain
+     */
+    detectLanguage(domain) {
+        if (this.vietnameseDomains.has(domain)) {
+            return 'vi';
+        } else if (domain.endsWith('.vn')) {
+            return 'vi';
+        }
+        return 'en';
     }
 
     /**
@@ -473,7 +788,7 @@ class ScraperService {
      * @returns {object} - Enhanced statistics object
      */
     getStats() {
-        const detectorStats = this.rssDetector.getStats();
+        const detectorStats = this.getRSSDetectionStats() || {};
 
         return {
             ...this.stats,
@@ -483,16 +798,22 @@ class ScraperService {
                 Math.round((this.stats.rssDetected / this.stats.totalRequests) * 100) : 0,
             rssUsageRate: this.stats.totalRequests > 0 ?
                 Math.round((this.stats.rssUsed / this.stats.totalRequests) * 100) : 0,
+            vietnameseVsInternational: {
+                vietnamese: this.stats.vietnameseSitesProcessed,
+                international: this.stats.internationalSitesProcessed,
+                vietnamesePercentage: this.stats.totalRequests > 0 ?
+                    Math.round((this.stats.vietnameseSitesProcessed / this.stats.totalRequests) * 100) : 0
+            },
 
-            // Advanced detection stats
-            advancedDetection: {
+            // Enhanced detection stats
+            enhancedDetection: {
                 ...detectorStats,
                 methodBreakdown: {
-                    htmlHead: detectorStats.htmlHeadDetection,
-                    domainRules: detectorStats.domainRuleDetection,
-                    urlPattern: detectorStats.urlPatternDetection,
-                    commonPaths: detectorStats.commonPathDetection,
-                    wordpress: detectorStats.wordpressDetection
+                    domainRules: detectorStats.domainRuleDetection || 0,
+                    smartPattern: detectorStats.smartPatternDetection || 0,
+                    htmlHead: detectorStats.htmlHeadDetection || 0,
+                    commonPaths: detectorStats.commonPathDetection || 0,
+                    urlPattern: detectorStats.urlPatternDetection || 0
                 }
             },
 
@@ -517,12 +838,16 @@ class ScraperService {
             rssUsed: 0,
             htmlScrapeUsed: 0,
             cacheHits: 0,
+            vietnameseSitesProcessed: 0,
+            internationalSitesProcessed: 0,
             averageResponseTime: 0,
             lastActivity: null
         };
 
         // Reset detector stats as well
-        this.rssDetector.resetStats();
+        if (this.rssDetector && this.rssDetector.resetStats) {
+            this.rssDetector.resetStats();
+        }
     }
 
     /**
@@ -532,17 +857,7 @@ class ScraperService {
      */
     addParsingRules(domain, rules) {
         this.parserService.addSiteRules(domain, rules);
-        logWithTimestamp(`Added custom parsing rules for domain: ${domain}`);
-    }
-
-    /**
-     * 🆕 Add custom RSS detection rule for a domain
-     * @param {string} domain - Domain name
-     * @param {Array} patterns - RSS URL patterns
-     */
-    addRSSDetectionRule(domain, patterns) {
-        this.rssDetector.addDomainRule(domain, patterns);
-        logWithTimestamp(`Added RSS detection rule for domain: ${domain}`);
+        logWithTimestamp(`📝 Added custom parsing rules for domain: ${domain}`);
     }
 
     /**
@@ -553,12 +868,54 @@ class ScraperService {
         return {
             httpService: this.httpService.getStats(),
             supportedSites: Object.keys(this.parserService.siteRules || {}),
+            vietnameseDomains: Array.from(this.vietnameseDomains),
             rssDetector: {
                 supportedDomains: Object.keys(this.rssDetector.domainRules || {}),
-                strategies: 5, // Number of active strategies
+                strategies: 5,
                 cacheSize: this.rssDetector.rssCache ? this.rssDetector.rssCache.size : 0
             },
             stats: this.getStats()
+        };
+    }
+
+    /**
+     * 🆕 Bulk RSS detection test for multiple URLs
+     * @param {Array} urls - Array of URLs to test
+     * @returns {Promise<Array>} - Array of test results
+     */
+    async bulkTestRSSDetection(urls) {
+        const results = [];
+
+        for (const url of urls) {
+            try {
+                const result = await this.testRSSDetection(url);
+                results.push(result);
+
+                // Rate limiting between tests
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+            } catch (error) {
+                results.push({
+                    url,
+                    found: false,
+                    error: error.message
+                });
+            }
+        }
+
+        // Generate summary
+        const summary = {
+            totalTested: results.length,
+            rssFound: results.filter(r => r.found).length,
+            rssValid: results.filter(r => r.rssValid).length,
+            vietnamese: results.filter(r => r.siteType === 'Vietnamese').length,
+            international: results.filter(r => r.siteType === 'International').length,
+            averageDuration: results.reduce((sum, r) => sum + (r.duration || 0), 0) / results.length
+        };
+
+        return {
+            summary,
+            results
         };
     }
 }
